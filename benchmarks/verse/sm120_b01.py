@@ -85,6 +85,16 @@ def request_text(url: str, timeout: float = 30) -> str:
         return response.read().decode()
 
 
+def request_empty(method: str, url: str, api_key: str, timeout: float = 300) -> None:
+    request = urllib.request.Request(
+        url,
+        headers={"Authorization": f"Bearer {api_key}"},
+        method=method,
+    )
+    with NO_REDIRECT_OPENER.open(request, timeout=timeout) as response:
+        response.read()
+
+
 def validate_loopback_endpoint(endpoint: str) -> str:
     parsed = urllib.parse.urlsplit(endpoint)
     if (
@@ -354,6 +364,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--minimum-steady-samples", type=int, default=50)
     parser.add_argument("--minimum-aggregate", type=float, default=992.0)
     parser.add_argument("--minimum-wall-ratio", type=float, default=0.9)
+    parser.add_argument(
+        "--cuda-profile-measurement",
+        action="store_true",
+        help=(
+            "bracket only the measured generation with the server's "
+            "/start_profile and /stop_profile CUDA profiler endpoints"
+        ),
+    )
     parser.add_argument("--image-digest", required=True)
     parser.add_argument("--fork-commit", required=True)
     parser.add_argument("--model-revision", required=True)
@@ -423,6 +441,11 @@ def main() -> int:
 
     before_metrics = wait_for_idle(endpoint, args.idle_timeout, args.metrics_interval)
 
+    profile_active = False
+    if args.cuda_profile_measurement:
+        request_empty("POST", f"{endpoint}/start_profile", api_key)
+        profile_active = True
+
     stop = threading.Event()
     samples: list[MetricSample] = []
     poller = threading.Thread(
@@ -449,8 +472,12 @@ def main() -> int:
             endpoint, args.idle_timeout, args.metrics_interval
         )
     finally:
-        stop.set()
-        poller.join(timeout=2)
+        try:
+            if profile_active:
+                request_empty("POST", f"{endpoint}/stop_profile", api_key)
+        finally:
+            stop.set()
+            poller.join(timeout=2)
 
     steady = longest_full_decode_window(
         samples,

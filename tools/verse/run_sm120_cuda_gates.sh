@@ -31,9 +31,10 @@ tools/verse/verify_sm120_source.sh "$VERSE_VLLM_EXPECTED_COMMIT" >/dev/null
   exit 1
 }
 
-uv run --script tools/verse/validate_sm120_profile.py \
+PROFILE_SHELL=$(uv run --script tools/verse/validate_sm120_profile.py \
   --image "$VERSE_VLLM_IMAGE" \
-  --expected-commit "$VERSE_VLLM_EXPECTED_COMMIT" >/dev/null
+  --expected-commit "$VERSE_VLLM_EXPECTED_COMMIT" --emit-shell)
+eval "$PROFILE_SHELL"
 
 docker image inspect "$VERSE_VLLM_IMAGE" >/dev/null
 IMAGE_COMMIT=$(docker image inspect \
@@ -63,7 +64,7 @@ EXPECTED_RUNTIME_BASE='nvidia/cuda:13.0.3-base-ubuntu24.04@sha256:97d085a7423ee1
   echo "candidate image has the wrong fork commit" >&2
   exit 1
 }
-[[ $IMAGE_PROFILE == sm120-gemma4-nvfp4-v2 ]] || {
+[[ $IMAGE_PROFILE == "$VERSE_RUNTIME_PROFILE" ]] || {
   echo "candidate image has the wrong Verse profile" >&2
   exit 1
 }

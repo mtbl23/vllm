@@ -146,8 +146,10 @@ grep -Fq "Using the FlashInfer FA2 paged wrapper" <<<"$LOGS" || {
   echo "native FlashInfer FA2 wrapper marker is absent" >&2
   exit 1
 }
-grep -Fq "split-KV is disabled" <<<"$LOGS" || {
-  echo "NVFP4 split-KV invariant marker is absent" >&2
+grep -Fq \
+  "head_dim=512, page_size=64, speculative_tokens=0, xqa=True" \
+  <<<"$LOGS" || {
+  echo "exact Verse D512 NVFP4 XQA route marker is absent" >&2
   exit 1
 }
 if grep -Eiq \
@@ -168,4 +170,4 @@ CURRENT_STARTED_AT=$(uv run --no-project python -c \
 
 printf 'status=healthy\ncontainer_id=%s\nendpoint=%s\ncommit=%s\nprofile=%s\ngpu_uuid=%s\n' \
   "$CONTAINER_ID" "$ENDPOINT" "$VERSE_VLLM_EXPECTED_COMMIT" \
-  sm120-gemma4-nvfp4-v2 "$GPU_UUID"
+  "$VERSE_RUNTIME_PROFILE" "$GPU_UUID"

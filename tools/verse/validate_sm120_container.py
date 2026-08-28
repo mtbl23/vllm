@@ -104,12 +104,16 @@ def expected_command(served_model: str) -> list[str]:
         profile["VERSE_LINEAR_BACKEND"],
         "--max-model-len",
         profile["VERSE_MAX_MODEL_LEN"],
+        "--block-size",
+        profile["VERSE_BLOCK_SIZE"],
         "--max-num-seqs",
         profile["VERSE_MAX_NUM_SEQS"],
         "--max-num-batched-tokens",
         profile["VERSE_MAX_NUM_BATCHED_TOKENS"],
         "--gpu-memory-utilization",
         profile["VERSE_GPU_MEMORY_UTILIZATION"],
+        "--kv-cache-memory-bytes",
+        profile["VERSE_KV_CACHE_MEMORY_BYTES"],
         "--kv-cache-dtype",
         profile["VERSE_KV_CACHE_DTYPE"],
         "--attention-backend",
@@ -122,7 +126,6 @@ def expected_command(served_model: str) -> list[str]:
         "--disable-uvicorn-access-log",
         "--generation-config",
         "vllm",
-        "--enforce-eager",
         "--compilation-config",
         profile["VERSE_COMPILATION_CONFIG"],
         "--host",
@@ -224,7 +227,7 @@ def validate_runtime_identity(args: argparse.Namespace) -> None:
             "schema_version": 1,
             "image": args.image,
             "fork_commit": args.expected_commit,
-            "profile": "sm120-gemma4-nvfp4-v2",
+            "profile": EXPECTED_PROFILE["VERSE_RUNTIME_PROFILE"],
             "gpu_device": args.gpu_device,
             "gpu_uuid": args.gpu_uuid,
         },
@@ -264,7 +267,8 @@ def validate_container(container: dict[str, Any], args: argparse.Namespace) -> d
         "container has the wrong vLLM wheel version label",
     )
     require(
-        labels.get("ai.verse.runtime.profile") == "sm120-gemma4-nvfp4-v2",
+        labels.get("ai.verse.runtime.profile")
+        == EXPECTED_PROFILE["VERSE_RUNTIME_PROFILE"],
         "container has the wrong Verse runtime profile",
     )
     require(
@@ -309,6 +313,10 @@ def validate_container(container: dict[str, Any], args: argparse.Namespace) -> d
         "UV_OVERRIDE": "/etc/uv-overrides-verse-sm120.txt",
         "VLLM_VERSE_RUNTIME_STRICT": "1",
         "VLLM_NVFP4_KV_VOSPLIT": "1",
+        "VLLM_VERSE_NVFP4_XQA_DECODE": EXPECTED_PROFILE["VERSE_NVFP4_XQA_DECODE"],
+        "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE": EXPECTED_PROFILE[
+            "VERSE_FLASHINFER_WORKSPACE_BUFFER_SIZE"
+        ],
         "VLLM_KV_CACHE_LAYOUT": "HND",
         "VLLM_PREFIX_CACHE_RETENTION_INTERVAL": "0",
         "VLLM_USE_FLASHINFER_SAMPLER": "0",
@@ -322,6 +330,7 @@ def validate_container(container: dict[str, Any], args: argparse.Namespace) -> d
         "TRITON_CACHE_DIR": "/cache/triton",
         "XDG_CACHE_HOME": "/cache/xdg",
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": "/cache/flashinfer-autotune",
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     }
     for name, expected_value in required_environment.items():
         require(

@@ -210,7 +210,7 @@ def cuda_tests() -> list[dict]:
             "result": "passed",
             "suite": "routing",
         }
-        for index in range(24)
+        for index in range(37)
     ]
     routing.extend(
         {
@@ -221,7 +221,7 @@ def cuda_tests() -> list[dict]:
             "result": "passed",
             "suite": "routing",
         }
-        for index in range(23)
+        for index in range(18)
     )
     gpu = [
         {
@@ -375,7 +375,7 @@ def test_release_finalizer_accepts_one_unchanged_container(tmp_path: Path):
 
     assert result["status"] == "pass"
     assert result["scope"] == "pre_cutover_candidate_qualification"
-    assert result["profile"] == "sm120-gemma4-nvfp4-v2"
+    assert result["profile"] == "sm120-gemma4-nvfp4-v3"
     assert result["release_nonce"] == RELEASE_NONCE
     assert result["container"]["id"] == CONTAINER_ID
     assert result["cuda_oracle"]["gpu"]["compute_capability"] == [12, 0]

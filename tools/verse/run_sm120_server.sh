@@ -242,7 +242,7 @@ EXPECTED_WHEEL_VERSION="0.28.0+verse.${VERSE_VLLM_EXPECTED_COMMIT:0:12}"
   echo "image commit $IMAGE_COMMIT does not match expected commit" >&2
   exit 1
 }
-[[ $IMAGE_PROFILE == sm120-gemma4-nvfp4-v2 ]] || {
+[[ $IMAGE_PROFILE == "$VERSE_RUNTIME_PROFILE" ]] || {
   echo "image is missing the Verse SM120 profile label" >&2
   exit 1
 }
@@ -278,7 +278,7 @@ install -d -o 2000 -g 0 -m 0750 \
 
 uv run --no-project python - \
   "$RUNTIME_CACHE" "$VERSE_VLLM_IMAGE" "$VERSE_VLLM_EXPECTED_COMMIT" \
-  "$GPU_DEVICE" "$GPU_UUID" <<'PY'
+  "$GPU_DEVICE" "$GPU_UUID" "$VERSE_RUNTIME_PROFILE" <<'PY'
 import json
 import os
 import sys
@@ -291,7 +291,7 @@ payload = {
     "schema_version": 1,
     "image": sys.argv[2],
     "fork_commit": sys.argv[3],
-    "profile": "sm120-gemma4-nvfp4-v2",
+    "profile": sys.argv[6],
     "gpu_device": sys.argv[4],
     "gpu_uuid": sys.argv[5],
 }
@@ -304,6 +304,8 @@ ENV_ARGS=(
   --env VLLM_API_KEY_FILE=/run/secrets/vllm_api_key
   --env VLLM_VERSE_RUNTIME_STRICT=1
   --env VLLM_NVFP4_KV_VOSPLIT=1
+  --env VLLM_VERSE_NVFP4_XQA_DECODE="$VERSE_NVFP4_XQA_DECODE"
+  --env VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE="$VERSE_FLASHINFER_WORKSPACE_BUFFER_SIZE"
   --env VLLM_KV_CACHE_LAYOUT="$VERSE_KV_CACHE_LAYOUT"
   --env VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0
   --env VLLM_USE_FLASHINFER_SAMPLER=0
@@ -317,6 +319,7 @@ ENV_ARGS=(
   --env TRITON_CACHE_DIR=/cache/triton
   --env XDG_CACHE_HOME=/cache/xdg
   --env VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR=/cache/flashinfer-autotune
+  --env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 )
 MOUNT_ARGS=(--mount "type=bind,src=$VERSE_VLLM_CACHE_DIR,dst=/cache")
 MOUNT_ARGS+=(--mount "type=bind,src=$MODEL_DIRECTORY,dst=/models/model,readonly")
@@ -377,9 +380,11 @@ CONTAINER_ID=$(docker create \
   --dtype bfloat16 \
   --linear-backend "$VERSE_LINEAR_BACKEND" \
   --max-model-len "$VERSE_MAX_MODEL_LEN" \
+  --block-size "$VERSE_BLOCK_SIZE" \
   --max-num-seqs "$VERSE_MAX_NUM_SEQS" \
   --max-num-batched-tokens "$VERSE_MAX_NUM_BATCHED_TOKENS" \
   --gpu-memory-utilization "$VERSE_GPU_MEMORY_UTILIZATION" \
+  --kv-cache-memory-bytes "$VERSE_KV_CACHE_MEMORY_BYTES" \
   --kv-cache-dtype "$VERSE_KV_CACHE_DTYPE" \
   --attention-backend "$VERSE_ATTENTION_BACKEND" \
   --enable-prefix-caching \
@@ -389,7 +394,6 @@ CONTAINER_ID=$(docker create \
   --no-enable-log-requests \
   --disable-uvicorn-access-log \
   --generation-config vllm \
-  --enforce-eager \
   --compilation-config "$VERSE_COMPILATION_CONFIG" \
   --host 0.0.0.0 \
   --port 8000)

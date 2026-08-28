@@ -7,6 +7,9 @@ cd "$ROOT"
 PYTHON_FILES=(
   setup.py
   benchmarks/verse/sm120_b01.py
+  benchmarks/verse/sm120_b12x_tactics.py
+  benchmarks/verse/sm120_lm_head.py
+  benchmarks/verse/sm120_nvfp4_decode_backends.py
   tests/benchmarks/test_verse_sm120_b01.py
   tests/kernels/attention/test_flashinfer.py
   tests/kernels/quantization/nvfp4_utils.py
@@ -36,7 +39,8 @@ PYTHON_FILES=(
   vllm/v1/attention/backends/flashinfer.py
 )
 
-bash -n tools/verse/*.sh docker/entrypoints/verse-sm120-entrypoint.sh
+bash -n tools/verse/*.sh docker/entrypoints/verse-sm120-entrypoint.sh \
+  benchmarks/verse/c22_launch_sm120_xqa.sh
 for executable in tools/verse/*.sh docker/entrypoints/verse-sm120-entrypoint.sh; do
   [[ -x $executable ]] || {
     echo "$executable must be executable" >&2

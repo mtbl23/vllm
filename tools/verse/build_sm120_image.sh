@@ -12,6 +12,7 @@ fi
 
 COMMIT=$(git rev-parse --verify 'HEAD^{commit}')
 VLLM_WHEEL_VERSION="0.28.0+verse.${COMMIT:0:12}"
+RUNTIME_PROFILE=sm120-gemma4-nvfp4-v3
 BUILD_BASE_IMAGE='pytorch/manylinux2_28-builder:cuda13.0@sha256:7710cbc19d7ee951134e2e827f8ec89237c993095eb2581dd5e74f58e4e278c7'
 FINAL_BASE_IMAGE='nvidia/cuda:13.0.3-base-ubuntu24.04@sha256:97d085a7423ee18ec483a2878b9be2c976dc4ba908aef96518beb00e1899dcc4'
 IMAGE_REPOSITORY=${VERSE_VLLM_IMAGE_REPOSITORY:-verse-vllm}
@@ -62,7 +63,7 @@ docker buildx build \
   --label org.opencontainers.image.revision="$COMMIT" \
   --label ai.verse.source.archive.sha256="$SOURCE_ARCHIVE_SHA256" \
   --label ai.verse.vllm.wheel.version="$VLLM_WHEEL_VERSION" \
-  --label ai.verse.runtime.profile=sm120-gemma4-nvfp4-v2 \
+  --label ai.verse.runtime.profile="$RUNTIME_PROFILE" \
   --label ai.verse.flashinfer.release=0.6.18.dev20260819 \
   --label ai.verse.flashinfer.manifest.sha256="$FLASHINFER_MANIFEST_SHA256" \
   --label ai.verse.base.build="$BUILD_BASE_IMAGE" \

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU unit tests for the strict Verse SM120 NVFP4 VO split."""
+"""CPU unit tests for the strict Verse SM120 NVFP4 attention route."""
 
 from types import SimpleNamespace
 
@@ -12,6 +12,8 @@ try:
     from vllm.v1.attention.backends.flashinfer import (
         FlashInferBackend,
         FlashInferMetadataBuilder,
+        _use_verse_sm120_nvfp4_xqa_decode,
+        _validate_verse_sm120_nvfp4_xqa_page_size,
         _vo_split_factor,
     )
 
@@ -31,7 +33,7 @@ pytestmark = pytest.mark.skipif(
         (128, True, 1),
         (256, True, 1),
         (256, False, 1),
-        (512, True, 2),
+        (512, True, 1),
         (512, False, 1),
     ],
 )
@@ -45,6 +47,51 @@ def test_vo_split_factor_nvfp4_fails_closed_without_knob(monkeypatch):
     monkeypatch.setenv("VLLM_NVFP4_KV_VOSPLIT", "0")
     with pytest.raises(ValueError, match="two-pass VO split"):
         _vo_split_factor(512, True)
+
+
+def test_xqa_decode_selects_only_exact_campaign22_tuple(monkeypatch):
+    monkeypatch.setenv("VLLM_VERSE_RUNTIME_STRICT", "1")
+    monkeypatch.setenv("VLLM_VERSE_NVFP4_XQA_DECODE", "1")
+    exact = {
+        "use_fa2_nvfp4_kv": True,
+        "num_q_heads": 16,
+        "num_kv_heads": 1,
+        "head_dim": 512,
+        "has_spec": False,
+    }
+    assert _use_verse_sm120_nvfp4_xqa_decode(**exact)
+
+    for changed in (
+        {"use_fa2_nvfp4_kv": False},
+        {"num_q_heads": 8},
+        {"num_kv_heads": 8},
+        {"head_dim": 256},
+        {"has_spec": True},
+    ):
+        assert not _use_verse_sm120_nvfp4_xqa_decode(**(exact | changed))
+
+
+def test_xqa_decode_fails_closed_without_both_opt_ins(monkeypatch):
+    exact = {
+        "use_fa2_nvfp4_kv": True,
+        "num_q_heads": 16,
+        "num_kv_heads": 1,
+        "head_dim": 512,
+        "has_spec": False,
+    }
+    monkeypatch.setenv("VLLM_VERSE_RUNTIME_STRICT", "0")
+    monkeypatch.setenv("VLLM_VERSE_NVFP4_XQA_DECODE", "1")
+    assert not _use_verse_sm120_nvfp4_xqa_decode(**exact)
+    monkeypatch.setenv("VLLM_VERSE_RUNTIME_STRICT", "1")
+    monkeypatch.setenv("VLLM_VERSE_NVFP4_XQA_DECODE", "0")
+    assert not _use_verse_sm120_nvfp4_xqa_decode(**exact)
+
+
+def test_xqa_decode_requires_exact_global_page_size():
+    _validate_verse_sm120_nvfp4_xqa_page_size(use_xqa=True, page_size=64)
+    _validate_verse_sm120_nvfp4_xqa_page_size(use_xqa=False, page_size=16)
+    with pytest.raises(ValueError, match="64-token global-attention page size"):
+        _validate_verse_sm120_nvfp4_xqa_page_size(use_xqa=True, page_size=16)
 
 
 class _ConsumerBlackwellPlatform:

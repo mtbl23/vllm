@@ -23,6 +23,8 @@ ALL_KNOBS = (
     "VLLM_KV_CACHE_LAYOUT",
     "VLLM_NVFP4_KV_VOSPLIT",
     "VLLM_VERSE_RUNTIME_STRICT",
+    "VLLM_VERSE_NVFP4_XQA_DECODE",
+    "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE",
     "VLLM_BATCH_INVARIANT",
 )
 
@@ -95,7 +97,7 @@ def _mock_vllm_config(
         global_head_dim if lt == "full_attention" else head_dim for lt in layer_types
     ]
     capture_sizes = (
-        [1, 2, 4, 8, 16, 24, 32, 38]
+        [1, 8, 16, 24, 32, 38]
         if cudagraph_capture_sizes is None
         else cudagraph_capture_sizes
     )
@@ -109,11 +111,16 @@ def _mock_vllm_config(
             cache_dtype=cache_dtype,
             kv_cache_dtype_skip_layers=kv_cache_dtype_skip_layers or [],
             kv_offloading_size=kv_offloading_size,
+            block_size=16,
+            kv_cache_memory_bytes=5_704_253_440,
+            gpu_memory_utilization=0.94,
+            enable_prefix_caching=True,
         ),
         scheduler_config=SimpleNamespace(
             max_num_seqs=max_num_seqs,
             max_num_batched_tokens=max_num_batched_tokens,
             async_scheduling=async_scheduling,
+            disable_hybrid_kv_cache_manager=False,
         ),
         speculative_config=SimpleNamespace() if speculative else None,
         compilation_config=SimpleNamespace(
@@ -191,6 +198,8 @@ def _enable_strict_verse(monkeypatch):
     monkeypatch.setenv("VLLM_VERSE_RUNTIME_STRICT", "1")
     monkeypatch.setenv("VLLM_KV_CACHE_LAYOUT", "HND")
     monkeypatch.setenv("VLLM_NVFP4_KV_VOSPLIT", "1")
+    monkeypatch.setenv("VLLM_VERSE_NVFP4_XQA_DECODE", "1")
+    monkeypatch.setenv("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", str(64 * 1024 * 1024))
 
 
 @pytest.mark.parametrize("capability", [CC12_0, CC12_1])

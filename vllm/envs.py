@@ -315,6 +315,7 @@ if TYPE_CHECKING:
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
     VLLM_VERSE_RUNTIME_STRICT: bool = False
+    VLLM_VERSE_NVFP4_XQA_DECODE: bool = False
 
 
 def get_default_cache_root():
@@ -1163,6 +1164,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_VERSE_RUNTIME_STRICT": lambda: bool(
         int(os.getenv("VLLM_VERSE_RUNTIME_STRICT", "0"))
+    ),
+    # Exact Campaign 22 SM120 appliance opt-in: route only Gemma 4's
+    # q16/kv1/D512 global one-token decode through FlashInfer XQA. The strict
+    # model-config gate validates the remaining serving tuple.
+    "VLLM_VERSE_NVFP4_XQA_DECODE": lambda: bool(
+        int(os.getenv("VLLM_VERSE_NVFP4_XQA_DECODE", "0"))
     ),
     # a local directory to look in for unrecognized LoRA adapters.
     # only works if plugins are enabled and

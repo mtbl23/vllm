@@ -78,7 +78,7 @@ CUDA_B12X_TEST_NODE_IDS = tuple(
     for case in ("decode", "max-seqs", "max-batched-tokens")
 )
 EXPECTED_CUDA_TEST_COUNTS = {
-    "routing": 47,
+    "routing": 55,
     "gpu_oracle": 6,
     "b12x_oracle": len(CUDA_B12X_TEST_NODE_IDS),
 }

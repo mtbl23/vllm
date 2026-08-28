@@ -265,6 +265,24 @@ class Gemma4Config(VerifyAndUpdateConfig):
                     "The strict Verse Gemma 4 runtime does not support KV-cache "
                     "dtype skip layers."
                 )
+            if cache_config.block_size != 16:
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires exactly --block-size 16."
+                )
+            if cache_config.kv_cache_memory_bytes != 5_704_253_440:
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires exactly "
+                    "--kv-cache-memory-bytes 5704253440."
+                )
+            if cache_config.gpu_memory_utilization != 0.94:
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires exactly "
+                    "--gpu-memory-utilization 0.94."
+                )
+            if not cache_config.enable_prefix_caching:
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires prefix caching."
+                )
             if envs.VLLM_KV_CACHE_LAYOUT != "HND":
                 raise ValueError(
                     "The strict Verse Gemma 4 runtime requires "
@@ -281,6 +299,16 @@ class Gemma4Config(VerifyAndUpdateConfig):
             if not envs.VLLM_NVFP4_KV_VOSPLIT:
                 raise ValueError(
                     "The strict Verse Gemma 4 runtime requires VLLM_NVFP4_KV_VOSPLIT=1."
+                )
+            if not envs.VLLM_VERSE_NVFP4_XQA_DECODE:
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires "
+                    "VLLM_VERSE_NVFP4_XQA_DECODE=1."
+                )
+            if envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE != 64 * 1024 * 1024:
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires exactly "
+                    "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE=67108864."
                 )
             if requested_backend not in (None, AttentionBackendEnum.FLASHINFER):
                 raise ValueError(
@@ -326,6 +354,11 @@ class Gemma4Config(VerifyAndUpdateConfig):
                     "The strict Verse Gemma 4 runtime requires synchronous "
                     "B01 scheduling."
                 )
+            if scheduler_config.disable_hybrid_kv_cache_manager is not False:
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires the hybrid "
+                    "KV-cache manager."
+                )
             if vllm_config.speculative_config is not None:
                 raise ValueError(
                     "The strict Verse Gemma 4 runtime does not support "
@@ -359,7 +392,7 @@ class Gemma4Config(VerifyAndUpdateConfig):
             from vllm.config import CUDAGraphMode
 
             compilation_config = vllm_config.compilation_config
-            expected_capture_sizes = [1, 2, 4, 8, 16, 24, 32, 38]
+            expected_capture_sizes = [1, 8, 16, 24, 32, 38]
             if model_config.enforce_eager:
                 raise ValueError(
                     "The strict Verse Gemma 4 runtime requires graph-enabled "
@@ -373,7 +406,7 @@ class Gemma4Config(VerifyAndUpdateConfig):
                 raise ValueError(
                     "The strict Verse Gemma 4 runtime requires exact "
                     "FULL_DECODE_ONLY CUDA graphs with capture sizes "
-                    "[1,2,4,8,16,24,32,38] and max capture size 38."
+                    f"{expected_capture_sizes} and max capture size 38."
                 )
             vllm_config.attention_config.backend = AttentionBackendEnum.FLASHINFER
             logger.info(

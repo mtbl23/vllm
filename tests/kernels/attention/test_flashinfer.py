@@ -322,6 +322,9 @@ def _run_nvfp4_gemma4_production_path(
     kv_lens: list[int],
     head_size: int,
     sliding_window: int | None,
+    num_q_heads: int = 8,
+    num_kv_heads: int = 4,
+    page_size: int = 16,
 ) -> None:
     """Exercise MetadataBuilder -> cache update -> FlashInferImpl.forward."""
     from vllm.config import set_current_vllm_config
@@ -332,6 +335,7 @@ def _run_nvfp4_gemma4_production_path(
         FIPrefill,
         FlashInferImpl,
         FlashInferMetadataBuilder,
+        FlashInferTrtllmAPIDecode,
     )
     from vllm.v1.attention.backends.utils import (
         PerLayerParameters,
@@ -346,9 +350,6 @@ def _run_nvfp4_gemma4_production_path(
     set_random_seed(0)
     device = torch.device("cuda")
     dtype = torch.bfloat16
-    page_size = 16
-    num_q_heads = 8
-    num_kv_heads = 4
     scale = head_size**-0.5
     common = _make_common_attention_metadata(
         query_lens=query_lens,
@@ -462,6 +463,7 @@ def _run_nvfp4_gemma4_production_path(
                 {
                     "VLLM_VERSE_RUNTIME_STRICT": "1",
                     "VLLM_NVFP4_KV_VOSPLIT": "1",
+                    "VLLM_VERSE_NVFP4_XQA_DECODE": "1",
                 },
             ),
             set_current_vllm_config(config),
@@ -538,15 +540,23 @@ def _run_nvfp4_gemma4_production_path(
 
             assert builder.use_fa2_nvfp4_kv
             assert builder.disable_split_kv
-            # Exact SM120 normally advertises dedicated XQA. The strict packed
-            # NVFP4 path must observe that availability and then deliberately
-            # clear it in favor of the native FA2 reader before execution.
+            expected_xqa = head_size == 512 and num_q_heads == 16 and num_kv_heads == 1
             assert can_use_trtllm_mock.call_count >= 1
-            assert builder.flashinfer_trtllm_api_decode_kernel is None
-            assert not builder.use_trtllm_decode_attention
-            assert not builder.use_dedicated_xqa
-            if head_size > 256:
-                assert builder.vo_split == 2
+            assert builder.use_dedicated_xqa == expected_xqa
+            assert builder.use_trtllm_decode_attention == expected_xqa
+            assert (
+                builder.flashinfer_trtllm_api_decode_kernel is not None
+            ) == expected_xqa
+            if expected_xqa:
+                assert not builder.use_fa2_large_head_prefill
+                expected_decodes = sum(query_len <= 1 for query_len in query_lens)
+                assert metadata.num_decodes == expected_decodes
+                assert isinstance(metadata.decode, FlashInferTrtllmAPIDecode) == (
+                    expected_decodes > 0
+                )
+            elif builder.use_fa2_decode_through_prefill:
+                assert builder.vo_split == 1
+                assert builder.use_fa2_large_head_prefill == (head_size > 256)
                 assert builder.reorder_batch_threshold == 0
                 assert metadata.num_decodes == 0
                 assert metadata.num_prefills == len(query_lens)
@@ -628,6 +638,9 @@ def test_flashinfer_fa2_nvfp4_gemma4_vo_split_hnd_matches_reference(
         kv_lens=kv_lens,
         head_size=512,
         sliding_window=None,
+        num_q_heads=16,
+        num_kv_heads=1,
+        page_size=64,
     )
 
 

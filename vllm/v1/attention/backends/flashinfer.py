@@ -104,24 +104,48 @@ def _vllm_nvfp4_kv_vosplit_requested() -> bool:
     return bool(envs.VLLM_VERSE_RUNTIME_STRICT and envs.VLLM_NVFP4_KV_VOSPLIT)
 
 
+def _use_verse_sm120_nvfp4_xqa_decode(
+    *,
+    use_fa2_nvfp4_kv: bool,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    has_spec: bool,
+) -> bool:
+    """Select XQA only for the measured Campaign 22 global-layer tuple.
+
+    FA2 remains responsible for cache writes, prefills, and every D=256
+    sliding layer. The dedicated XQA decode API consumes the same zero-copy
+    packed-data and scale views for pure one-token D=512 global decode. Keep
+    this deliberately exact so no unrelated NVFP4 model is rerouted.
+    """
+    return bool(
+        envs.VLLM_VERSE_RUNTIME_STRICT
+        and envs.VLLM_VERSE_NVFP4_XQA_DECODE
+        and use_fa2_nvfp4_kv
+        and num_q_heads == 16
+        and num_kv_heads == 1
+        and head_dim == 512
+        and not has_spec
+    )
+
+
+def _validate_verse_sm120_nvfp4_xqa_page_size(*, use_xqa: bool, page_size: int) -> None:
+    """Fail closed if the selected global XQA group changes cache geometry."""
+    if use_xqa and page_size != 64:
+        raise ValueError(
+            "Verse SM120 NVFP4 XQA decode requires the exact 64-token "
+            f"global-attention page size; got {page_size}."
+        )
+
+
 def _vo_split_factor(head_size: int, is_fa2_nvfp4: bool) -> int:
-    """Number of VO passes for the FlashInfer FA2 path.
+    """Number of external VO passes for the FlashInfer FA2 path.
 
-    The FA2 nvfp4 kernel trait guard rejects HEAD_DIM_VO > 256 (the
-    per-thread output-accumulator fragments do not fit the register
-    budget), but HEAD_DIM_QK=512 is fine, and attention decomposes
-    EXACTLY along the VO dimension: S = Q @ K^T and the softmax are
-    identical per pass, and O = [P @ V_left | P @ V_right] concatenates
-    with no LSE merge. So a Gemma 4 full-attention head (Q=K=V=512 wide;
-    the cache stores V at 512) runs as ``ceil(head_size/256)`` passes of
-    ``(head_dim_qk=512, head_dim_vo=256)``, each over a head-dim slice of
-    the 512-wide V cache (and, for NVFP4, of its per-16-element scale
-    factors).
-
-    This helper deliberately leaves every non-strict FlashInfer route alone.
-    The production proof and cache-layout invariant cover only the exact
-    strict SM120 FA2 NVFP4 tuple; applying the split to generic 512-wide
-    FlashInfer attention would silently reroute unrelated models.
+    The pinned FlashInfer large-head kernel performs its VO split inside one
+    invocation. Keeping the split internal preserves one QK/softmax/K read for
+    Gemma 4's 512-wide global-attention heads instead of repeating that work in
+    two separate wrapper calls.
     """
     if not is_fa2_nvfp4 or head_size <= 256:
         return 1
@@ -132,14 +156,7 @@ def _vo_split_factor(head_size: int, is_fa2_nvfp4: bool) -> int:
             "at 256). Set VLLM_NVFP4_KV_VOSPLIT=1 to enable it, or keep "
             "these layers on a different KV dtype."
         )
-    split = -(-head_size // 256)  # ceil(head_size / 256)
-    if head_size % split != 0 or (head_size // split) % 16 != 0:
-        raise ValueError(
-            "The VO split needs head_size divisible into <=256-wide chunks"
-            " of whole 16-element scale blocks; "
-            f"got head_size={head_size}."
-        )
-    return split
+    return 1
 
 
 trtllm_workspace_buffer = None
@@ -980,18 +997,36 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
             self.use_trtllm_decode_attention = False
             self.flashinfer_trtllm_api_decode_kernel = None
+        self.use_verse_nvfp4_xqa_decode = _use_verse_sm120_nvfp4_xqa_decode(
+            use_fa2_nvfp4_kv=self.use_fa2_nvfp4_kv,
+            num_q_heads=self.num_qo_heads,
+            num_kv_heads=self.num_kv_heads,
+            head_dim=self.head_dim,
+            has_spec=num_spec_tokens > 0,
+        )
+        _validate_verse_sm120_nvfp4_xqa_page_size(
+            use_xqa=self.use_verse_nvfp4_xqa_decode,
+            page_size=self.page_size,
+        )
+        if self.use_fa2_nvfp4_kv:
+            logger.info(
+                "Verse SM120 NVFP4 decode route: q_heads=%d, kv_heads=%d, "
+                "head_dim=%d, page_size=%d, speculative_tokens=%d, xqa=%s",
+                self.num_qo_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                self.page_size,
+                num_spec_tokens,
+                self.use_verse_nvfp4_xqa_decode,
+            )
         if (
             self.use_fa2_nvfp4_kv
             and self.flashinfer_trtllm_api_decode_kernel is not None
+            and not self.use_verse_nvfp4_xqa_decode
         ):
-            # NVFP4 KV on the strict Verse SM120 path is served by FlashInfer FA2
-            # paged reader; neither the dedicated-XQA nor the trtllm-gen decode
-            # API accepts the packed fp4 cache (FlashInferImpl.forward asserts
-            # on it). Upstream selects dedicated XQA on sm12x regardless of KV
-            # dtype, so without this the engine cannot boot with
-            # --kv-cache-dtype nvfp4. The fa2 route is also what every sm12x
-            # measurement on this PR was taken on, and XQA benchmarked 0.7-1.2%
-            # slower at equal cudagraph mode (#49818), so nothing is lost.
+            # Keep every non-global or speculative NVFP4 route on FA2. The
+            # exact Campaign 22 D512 path is the only exception: XQA accepts
+            # its packed data and scale views directly.
             logger.info_once(
                 "NVFP4 KV cache on strict Verse SM120 uses the FlashInfer FA2 "
                 "paged decode path; disabling the %s decode API.",
@@ -1025,6 +1060,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # head_dim_qk=512). vo_split == 1 leaves all existing paths
         # untouched.
         self.vo_split = _vo_split_factor(self.head_dim, self.use_fa2_nvfp4_kv)
+        self.use_fa2_large_head_prefill = bool(
+            self.use_fa2_nvfp4_kv
+            and self.head_dim > 256
+            and not self.use_verse_nvfp4_xqa_decode
+        )
         if self.use_fa2_nvfp4_kv:
             if self.use_dcp:
                 raise ValueError(
@@ -1037,20 +1077,21 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # invariant so a dependency change cannot silently re-enable the
             # corrupt route.
             self.disable_split_kv = True
-        if self.vo_split > 1:
+        self.use_fa2_decode_through_prefill = self.use_fa2_large_head_prefill
+        if self.use_fa2_decode_through_prefill:
             # BatchDecodeWithPagedKVCacheWrapper.plan() has no head_dim_vo,
             # so route every request through the VO-split-planned prefill
             # wrapper: threshold 0 classifies nothing as decode, and a
             # causal qo_len==1 prefill computes exactly what decode would.
             self.reorder_batch_threshold = 0
             logger.info_once(
-                "FA2 VO split (%s KV): head_size %d runs as %d passes of "
-                "head_dim_vo=%d; decode requests use the prefill wrapper and "
-                "split-KV is disabled.",
+                "FA2 large-head attention (%s KV): head_size %d uses %d "
+                "external VO passes at head_dim_vo=%d; decode requests use "
+                "the prefill wrapper and split-KV is disabled.",
                 self.cache_dtype,
                 self.head_dim,
                 self.vo_split,
-                self.head_dim // self.vo_split,
+                self.head_dim,
             )
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
@@ -1075,6 +1116,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.window_left = self.global_hyperparameters.window_left
         self.logits_soft_cap = self.global_hyperparameters.logits_soft_cap
         self.has_sinks = self.global_hyperparameters.has_sinks
+        if self.use_verse_nvfp4_xqa_decode and (
+            self.window_left != -1
+            or self.logits_soft_cap not in (None, 0.0)
+            or self.has_sinks
+            or self.use_dcp
+        ):
+            raise ValueError(
+                "Verse SM120 NVFP4 XQA decode requires global attention, "
+                "no attention softcap or sinks, and DCP=1."
+            )
         if self.has_sinks and not FlashInferBackend.supports_sink():
             raise NotImplementedError(
                 "FlashInfer backend currently does not support attention "
@@ -1337,7 +1388,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             assert causal
             assert self.enable_cuda_graph
             assert self.use_fa2_nvfp4_kv
-            assert self.vo_split > 1
+            assert self.use_fa2_decode_through_prefill
             assert not self.use_dcp
             assert batch_size is not None and batch_size > 0
             wrapper = self._prefill_wrappers_cudagraph.get(batch_size)
@@ -1830,7 +1881,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 use_vo_split_decode_cudagraph = (
                     self.enable_cuda_graph
                     and self.use_fa2_nvfp4_kv
-                    and self.vo_split > 1
+                    and self.use_fa2_decode_through_prefill
                     and attn_metadata.causal
                     and common_attn_metadata.max_query_len == 1
                     and num_prefills == num_reqs
@@ -2054,6 +2105,7 @@ class FlashInferImpl(AttentionImpl):
         self.cache_dtype = kv_cache_dtype
         self.is_kvcache_nvfp4 = kv_cache_dtype.startswith("nvfp4")
         self.kv_cache_dtype = "nvfp4" if self.is_kvcache_nvfp4 else kv_cache_dtype
+        vllm_config = get_current_vllm_config_or_none()
         capability = current_platform.get_device_capability()
         self.use_fa2_nvfp4_kv = bool(
             self.is_kvcache_nvfp4
@@ -2061,12 +2113,24 @@ class FlashInferImpl(AttentionImpl):
             and capability.to_int() == 120
             and _vllm_nvfp4_kv_vosplit_requested()
         )
+        self.use_verse_nvfp4_xqa_decode = _use_verse_sm120_nvfp4_xqa_decode(
+            use_fa2_nvfp4_kv=self.use_fa2_nvfp4_kv,
+            num_q_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_size,
+            has_spec=(
+                vllm_config is not None and vllm_config.speculative_config is not None
+            ),
+        )
         self.fp4_data_dim = head_size // 2 if self.is_kvcache_nvfp4 else 0
-        # Two-pass VO split factor for head_size > 256 (Gemma 4 D=512); 1
-        # otherwise. Must match the builder's vo_split: the wrapper is
-        # planned with head_dim_vo = head_size // vo_split, so the impl must
-        # run it once per V slice when vo_split > 1.
+        # External VO split factor. The pinned large-head kernel handles
+        # Gemma 4 D=512 internally, so the strict SM120 route remains one pass.
         self.vo_split = _vo_split_factor(head_size, self.use_fa2_nvfp4_kv)
+        self.use_fa2_large_head_prefill = bool(
+            self.use_fa2_nvfp4_kv
+            and head_size > 256
+            and not self.use_verse_nvfp4_xqa_decode
+        )
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
@@ -2095,7 +2159,6 @@ class FlashInferImpl(AttentionImpl):
         self.supports_xqa_or_trtllm_gen_decode = can_use_trtllm_attention(
             num_heads, num_kv_heads, is_prefill=False
         )
-        vllm_config = get_current_vllm_config_or_none()
         # Query pre-quantization needs a single dtype for the whole query tensor.
         # SM90 XQA needs BF16/FP16-Q for decode and FP8 for prefill,
         # so only enable this for SM100 trtllm-gen where both use FP8-Q.
@@ -2434,7 +2497,7 @@ class FlashInferImpl(AttentionImpl):
         )
         if decode_with_dedicated_xqa:
             assert not use_dcp
-            assert not self.is_kvcache_nvfp4
+            assert not self.is_kvcache_nvfp4 or self.use_verse_nvfp4_xqa_decode
             assert self.o_sf_scale is None
             assert output.dtype != FP4_DTYPE
 
@@ -2676,10 +2739,10 @@ class FlashInferImpl(AttentionImpl):
             # through the prefill wrapper (builder sets reorder_batch_threshold
             # = 0), because BatchDecodeWithPagedKVCacheWrapper.plan() has no
             # head_dim_vo. So no decode tokens should reach this block.
-            assert self.vo_split == 1, (
-                "FA2 VO split routes decodes through the prefill wrapper; "
+            assert not self.use_fa2_large_head_prefill, (
+                "FA2 large-head attention routes decodes through the prefill wrapper; "
                 f"unexpected {num_decode_tokens} decode tokens with "
-                f"vo_split={self.vo_split}."
+                f"head_size={self.head_size}."
             )
 
             # Convert query to the expected dtype for decode if needed.
@@ -2807,7 +2870,9 @@ class FlashInferImpl(AttentionImpl):
 
                     flashinfer_xqa_batch_decode_with_kv_cache(
                         query=decode_query,
-                        kv_cache=kv_cache_tuple,
+                        kv_cache=(
+                            nvfp4_kv_data if self.is_kvcache_nvfp4 else kv_cache_tuple
+                        ),
                         workspace_buffer=workspace_buffer,
                         block_tables=block_tables_decode,
                         seq_lens=seq_lens_decode,
@@ -2820,6 +2885,9 @@ class FlashInferImpl(AttentionImpl):
                         kv_layout=get_kv_cache_layout(),
                         q_len_per_req=q_len_per_req,
                         mask=attn_metadata.decode.mask,
+                        kv_cache_sf=(
+                            nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
+                        ),
                         q_cu_seq_lens=attn_metadata.decode.q_cu_seq_lens,
                     )
                     return output_padded
