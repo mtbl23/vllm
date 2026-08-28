@@ -27,6 +27,9 @@ from vllm.multimodal.inputs import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor
 from vllm.v1.core.block_pool import BlockHashToBlockMap, BlockPool
+from vllm.v1.core.kv_cache_coordinator import (
+    _validate_verse_runtime_retention_interval,
+)
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager, Request
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -3178,6 +3181,27 @@ def test_hybrid_local_kv_retention_interval_aligns_in_manager(monkeypatch):
             assert cached is not None, f"SWA hash {i} should be cached"
         else:
             assert cached is None, f"SWA hash {i} should not be cached"
+
+
+@pytest.mark.parametrize("interval", [None, 32, 64])
+def test_verse_runtime_requires_latest_boundary_retention(monkeypatch, interval):
+    monkeypatch.setenv("VLLM_VERSE_RUNTIME_STRICT", "1")
+
+    with pytest.raises(ValueError, match="requires.*retention.*0"):
+        _validate_verse_runtime_retention_interval(interval)
+
+
+def test_verse_runtime_accepts_latest_boundary_retention(monkeypatch):
+    monkeypatch.setenv("VLLM_VERSE_RUNTIME_STRICT", "1")
+
+    _validate_verse_runtime_retention_interval(0)
+
+
+def test_non_verse_runtime_preserves_retention_compatibility(monkeypatch):
+    monkeypatch.delenv("VLLM_VERSE_RUNTIME_STRICT", raising=False)
+
+    for interval in (None, 0, 32):
+        _validate_verse_runtime_retention_interval(interval)
 
 
 @pytest.mark.parametrize(

@@ -60,6 +60,16 @@ def _validate_prefix_cache_retention_interval(
         )
 
 
+def _validate_verse_runtime_retention_interval(
+    retention_interval: int | None,
+) -> None:
+    if envs.VLLM_VERSE_RUNTIME_STRICT and retention_interval != 0:
+        raise ValueError(
+            "Verse runtime strict mode requires prefix cache retention interval 0. "
+            "Set VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0."
+        )
+
+
 class KVCacheCoordinator(ABC):
     """
     Coordinate the KV cache of different KV cache groups.
@@ -152,6 +162,7 @@ class KVCacheCoordinator(ABC):
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
         # 0 = keep only the latest replay boundary; None = dense;
         self.retention_interval = envs.VLLM_PREFIX_CACHE_RETENTION_INTERVAL
+        _validate_verse_runtime_retention_interval(self.retention_interval)
         _validate_prefix_cache_retention_interval(
             self.retention_interval, self.scheduler_block_size, kv_cache_config
         )
