@@ -129,7 +129,9 @@ def test_mm_prefix_support_generic_backend_fails_closed(monkeypatch):
 
 
 @pytest.mark.parametrize("dcp_size", [1, 2])
-def test_nvfp4_consumer_blackwell_cudagraph_fails_closed(monkeypatch, dcp_size):
+def test_nvfp4_consumer_blackwell_supports_single_token_decode_graphs(
+    monkeypatch, dcp_size
+):
     monkeypatch.setenv("VLLM_VERSE_RUNTIME_STRICT", "1")
     monkeypatch.setenv("VLLM_NVFP4_KV_VOSPLIT", "1")
     config = SimpleNamespace(
@@ -141,5 +143,5 @@ def test_nvfp4_consumer_blackwell_cudagraph_fails_closed(monkeypatch, dcp_size):
     )
     assert (
         FlashInferMetadataBuilder.get_cudagraph_support(config, None)
-        == AttentionCGSupport.NEVER
+        == AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     )

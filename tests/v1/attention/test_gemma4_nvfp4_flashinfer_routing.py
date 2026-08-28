@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from vllm.config import CUDAGraphMode
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -22,6 +23,7 @@ ALL_KNOBS = (
     "VLLM_KV_CACHE_LAYOUT",
     "VLLM_NVFP4_KV_VOSPLIT",
     "VLLM_VERSE_RUNTIME_STRICT",
+    "VLLM_BATCH_INVARIANT",
 )
 
 CC12_0 = DeviceCapability(12, 0)
@@ -76,7 +78,11 @@ def _mock_vllm_config(
     max_model_len=6144,
     max_num_seqs=38,
     max_num_batched_tokens=256,
-    enforce_eager=True,
+    enforce_eager=False,
+    linear_backend="flashinfer_b12x",
+    cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    cudagraph_capture_sizes=None,
+    max_cudagraph_capture_size=38,
     async_scheduling=False,
     speculative=False,
     tensor_parallel_size=1,
@@ -88,6 +94,11 @@ def _mock_vllm_config(
     head_sizes = [
         global_head_dim if lt == "full_attention" else head_dim for lt in layer_types
     ]
+    capture_sizes = (
+        [1, 2, 4, 8, 16, 24, 32, 38]
+        if cudagraph_capture_sizes is None
+        else cudagraph_capture_sizes
+    )
     return SimpleNamespace(
         attention_config=SimpleNamespace(
             backend=backend,
@@ -105,6 +116,12 @@ def _mock_vllm_config(
             async_scheduling=async_scheduling,
         ),
         speculative_config=SimpleNamespace() if speculative else None,
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=cudagraph_mode,
+            cudagraph_capture_sizes=capture_sizes,
+            max_cudagraph_capture_size=max_cudagraph_capture_size,
+        ),
+        kernel_config=SimpleNamespace(linear_backend=linear_backend),
         parallel_config=SimpleNamespace(
             tensor_parallel_size=tensor_parallel_size,
             pipeline_parallel_size=1,
@@ -320,7 +337,11 @@ def test_strict_verse_runtime_requires_hnd_layout(fake_cc, monkeypatch):
         ({"speculative": True}, "speculative decoding"),
         ({"tensor_parallel_size": 2}, "TP1/PP1/DP1/DCP1"),
         ({"kv_offloading_size": 8.0}, "KV offload"),
-        ({"enforce_eager": False}, "--enforce-eager"),
+        ({"enforce_eager": True}, "graph-enabled"),
+        ({"linear_backend": "auto"}, "linear-backend flashinfer_b12x"),
+        ({"cudagraph_mode": CUDAGraphMode.NONE}, "FULL_DECODE_ONLY"),
+        ({"cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 38]}, "capture sizes"),
+        ({"max_cudagraph_capture_size": 64}, "max capture size 38"),
         (
             {"kv_cache_dtype_skip_layers": ["sliding_attention"]},
             "dtype skip layers",
@@ -340,3 +361,11 @@ def test_strict_verse_runtime_requires_fixed_serving_tuple(
     fake_cc(CC12_0)
     with pytest.raises(ValueError, match=error):
         _gemma4_route(_mock_vllm_config(**overrides))
+
+
+def test_strict_verse_runtime_rejects_batch_invariant_override(fake_cc, monkeypatch):
+    _enable_strict_verse(monkeypatch)
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    fake_cc(CC12_0)
+    with pytest.raises(ValueError, match="VLLM_BATCH_INVARIANT"):
+        _gemma4_route(_mock_vllm_config())

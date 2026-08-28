@@ -837,6 +837,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.enable_cuda_graph = (
             self.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
         )
+        self._prefill_wrappers_cudagraph: dict[
+            int, BatchPrefillWithPagedKVCacheWrapper
+        ] = {}
         if self.enable_cuda_graph:
             # For full cudagraph capture, one `decode_wrapper` for each batch
             # size is needed for FlashInfer.
@@ -1105,6 +1108,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )  # Extra buffer for mutable paged_kv_indptr.cpu in cuda graph mode
         self.paged_kv_indices = self._make_buffer(max_num_pages)
         self.paged_kv_last_page_len = self._make_buffer(max_num_reqs)
+        # Gemma 4's 512-wide V/O requires the FA2 paged-prefill kernel even for
+        # one-token decode. Full CUDA graphs therefore need the same fixed-
+        # address qo_indptr contract as FlashInfer's decode wrapper. The CPU
+        # side is the graph-padded [0, 1, ..., batch_size] decode layout; the
+        # wrapper copies it into the stable GPU slice before every replay.
+        self._uniform_decode_qo_indptr = self._make_buffer(max_num_reqs + 1)
+        self._uniform_decode_qo_indptr.np[:] = np.arange(
+            max_num_reqs + 1, dtype=np.int32
+        )
 
     # Keep SM90 prefill/decode Q dtype selection in one place.
     def get_q_data_type(self, is_prefill: bool) -> torch.dtype:
@@ -1175,9 +1187,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
         is_sm12x = current_platform.is_device_capability_family(120)
-        # NVFP4 KV on SM120 decodes through a native FA2 prefill wrapper. That
-        # wrapper does not yet own graph-stable metadata buffers, so advertising
-        # graph support can hang capture or replay with stale page metadata.
+        # NVFP4 KV on SM120 decodes through a native FA2 prefill wrapper. The
+        # strict path gives that wrapper fixed-address qo/page metadata buffers,
+        # so full graphs are safe for uniform one-token decode only. Mixed and
+        # multi-token batches remain eager.
         cache_config = vllm_config.cache_config
         if (
             is_sm12x
@@ -1185,7 +1198,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             and cache_config is not None
             and cache_config.cache_dtype == "nvfp4"
         ):
-            return AttentionCGSupport.NEVER
+            return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
         # XQA does not return LSE and therefore does not support DCP.
         if is_sm12x and vllm_config.parallel_config.decode_context_parallel_size > 1:
@@ -1316,7 +1329,34 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def _get_prefill_wrapper(
         self,
         causal: bool = True,
+        *,
+        batch_size: int | None = None,
+        use_cudagraph: bool = False,
     ) -> BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper:
+        if use_cudagraph:
+            assert causal
+            assert self.enable_cuda_graph
+            assert self.use_fa2_nvfp4_kv
+            assert self.vo_split > 1
+            assert not self.use_dcp
+            assert batch_size is not None and batch_size > 0
+            wrapper = self._prefill_wrappers_cudagraph.get(batch_size)
+            if wrapper is None:
+                wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                    self._get_workspace_buffer(),
+                    get_kv_cache_layout(),
+                    use_cuda_graph=True,
+                    qo_indptr_buf=self._uniform_decode_qo_indptr.gpu[: batch_size + 1],
+                    paged_kv_indptr_buf=self.paged_kv_indptr.gpu[: batch_size + 1],
+                    paged_kv_indices_buf=self.paged_kv_indices.gpu,
+                    paged_kv_last_page_len_buf=self.paged_kv_last_page_len.gpu[
+                        :batch_size
+                    ],
+                    backend="fa2",
+                )
+                self._prefill_wrappers_cudagraph[batch_size] = wrapper
+            return wrapper
+
         if not causal:
             if self.use_dcp:
                 raise NotImplementedError(
@@ -1787,7 +1827,20 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     max_seq_len=max_seq_len,
                 )
             else:
-                prefill_wrapper = self._get_prefill_wrapper(causal=attn_metadata.causal)
+                use_vo_split_decode_cudagraph = (
+                    self.enable_cuda_graph
+                    and self.use_fa2_nvfp4_kv
+                    and self.vo_split > 1
+                    and attn_metadata.causal
+                    and common_attn_metadata.max_query_len == 1
+                    and num_prefills == num_reqs
+                    and num_prefill_tokens <= self._decode_cudagraph_max_bs
+                )
+                prefill_wrapper = self._get_prefill_wrapper(
+                    causal=attn_metadata.causal,
+                    batch_size=num_prefills,
+                    use_cudagraph=use_vo_split_decode_cudagraph,
+                )
                 # Slicing CPU buffers that are only needed for FI native prefills
                 paged_kv_last_page_len_prefill_cpu = self.paged_kv_last_page_len.cpu[
                     prefill_start:num_reqs
@@ -1830,8 +1883,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         if (self.is_kvcache_nvfp4 and not self.use_fa2_nvfp4_kv)
                         else self.model_config.dtype
                     )
+                    # A full graph pads uniform decode to the captured request
+                    # count. Its query tensor has one row per virtual request,
+                    # while the scheduler repeats the last real qo offset. Give
+                    # FlashInfer the fixed [0..batch] layout; vLLM discards the
+                    # padded outputs.
+                    qo_indptr_plan = (
+                        self._uniform_decode_qo_indptr.cpu[: num_prefills + 1]
+                        if use_vo_split_decode_cudagraph
+                        else qo_indptr_prefill_cpu
+                    )
                     prefill_wrapper.plan(
-                        qo_indptr=qo_indptr_prefill_cpu,
+                        qo_indptr=qo_indptr_plan,
                         paged_kv_indptr=paged_kv_indptr_prefill_cpu,
                         paged_kv_indices=paged_kv_indices,
                         paged_kv_last_page_len=paged_kv_last_page_len_prefill_cpu,

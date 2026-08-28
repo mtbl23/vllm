@@ -345,16 +345,41 @@ class Gemma4Config(VerifyAndUpdateConfig):
                 raise ValueError(
                     "The strict Verse Gemma 4 runtime does not support KV offload."
                 )
-            if not model_config.enforce_eager:
+            if envs.VLLM_BATCH_INVARIANT:
                 raise ValueError(
-                    "The strict Verse Gemma 4 runtime requires --enforce-eager "
-                    "until the NVFP4 FA2 prefill wrapper is graph-safe."
+                    "The strict Verse Gemma 4 runtime rejects "
+                    "VLLM_BATCH_INVARIANT because it overrides the qualified "
+                    "FlashInfer B12X linear backend."
+                )
+            if vllm_config.kernel_config.linear_backend != "flashinfer_b12x":
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires exactly "
+                    "--linear-backend flashinfer_b12x."
+                )
+            from vllm.config import CUDAGraphMode
+
+            compilation_config = vllm_config.compilation_config
+            expected_capture_sizes = [1, 2, 4, 8, 16, 24, 32, 38]
+            if model_config.enforce_eager:
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires graph-enabled "
+                    "execution, not --enforce-eager."
+                )
+            if (
+                compilation_config.cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY
+                or compilation_config.cudagraph_capture_sizes != expected_capture_sizes
+                or compilation_config.max_cudagraph_capture_size != 38
+            ):
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires exact "
+                    "FULL_DECODE_ONLY CUDA graphs with capture sizes "
+                    "[1,2,4,8,16,24,32,38] and max capture size 38."
                 )
             vllm_config.attention_config.backend = AttentionBackendEnum.FLASHINFER
             logger.info(
                 "Strict Verse Gemma 4 runtime validated exact SM120, "
-                "NVFP4 KV, FLASHINFER, eager execution, and the fixed Verse "
-                "6144/38/256 serving tuple."
+                "NVFP4 KV, FLASHINFER, FlashInfer B12X, FULL_DECODE_ONLY "
+                "graphs, and the fixed Verse 6144/38/256 serving tuple."
             )
             return
 
