@@ -2948,6 +2948,106 @@ def test_unify_kv_cache_spec_page_size_mamba():
     assert kv_cache_utils.unify_kv_cache_spec_page_size(specs) == specs
 
 
+def test_unify_kv_cache_page_size_scales_block_before_padding():
+    """A padded attention layer grows its block before physical padding."""
+    small = new_kv_cache_spec(
+        block_size=16,
+        indexes_kv_by_block_stride=True,
+    )
+    large = new_kv_cache_spec(block_size=40)
+    assert small.page_size_bytes == 16384
+    assert large.page_size_bytes == 40960
+    assert large.page_size_bytes % small.page_size_bytes != 0
+
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {"small_attn_layer": small, "large_attn_layer": large}
+    )
+
+    assert unified["small_attn_layer"].block_size == 32
+    assert unified["small_attn_layer"].page_size_padded == 40960
+    assert unified["small_attn_layer"].page_size_bytes == 40960
+    assert unified["large_attn_layer"] == large
+
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {
+            "small_attn_layer": new_kv_cache_spec(
+                block_size=24,
+                indexes_kv_by_block_stride=True,
+            ),
+            "large_attn_layer": new_kv_cache_spec(block_size=32),
+        }
+    )
+    assert unified["small_attn_layer"].block_size == 24
+    assert unified["small_attn_layer"].page_size_bytes == 32768
+
+
+def test_unify_kv_cache_page_size_ignores_stale_plain_attention_padding():
+    """Plain attention scales from its natural page in both branches."""
+    from dataclasses import replace
+
+    pre_padded = replace(
+        new_kv_cache_spec(
+            block_size=16,
+            indexes_kv_by_block_stride=True,
+        ),
+        page_size_padded=24576,
+    )
+    large = new_kv_cache_spec(block_size=40)
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {"pre_padded_layer": pre_padded, "large_attn_layer": large}
+    )
+
+    assert unified["pre_padded_layer"].block_size == 32
+    assert unified["pre_padded_layer"].unpadded_page_size_bytes == 32768
+    assert unified["pre_padded_layer"].page_size_padded == 40960
+    assert unified["pre_padded_layer"].page_size_bytes == 40960
+
+    pre_padded = replace(
+        new_kv_cache_spec(block_size=16),
+        page_size_padded=24576,
+    )
+    large = new_kv_cache_spec(block_size=48)
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {"pre_padded_layer": pre_padded, "large_attn_layer": large}
+    )
+
+    assert unified["pre_padded_layer"].block_size == 48
+    assert unified["pre_padded_layer"].page_size_padded is None
+    assert unified["pre_padded_layer"].page_size_bytes == 49152
+
+
+def test_unify_kv_cache_page_size_keeps_mla_alignment_as_scaling_base():
+    """MLA alignment padding is intrinsic and remains the scaling base."""
+    mla = MLAAttentionSpec(
+        block_size=1,
+        num_kv_heads=1,
+        head_size=96,
+        dtype=torch.float32,
+        alignment=512,
+    )
+    assert mla.unpadded_page_size_bytes == 384
+    assert mla.page_size_bytes == 512
+
+    large = new_kv_cache_spec(block_size=1)
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(
+        {"mla_layer": mla, "large_attn_layer": large}
+    )
+    assert unified["mla_layer"].block_size == 2
+    assert unified["mla_layer"].page_size_bytes == 1024
+    assert unified["large_attn_layer"] == large
+
+    odd = FullAttentionSpec(
+        block_size=3,
+        num_kv_heads=1,
+        head_size=32,
+        dtype=torch.float32,
+    )
+    with pytest.raises(NotImplementedError):
+        kv_cache_utils.unify_kv_cache_spec_page_size(
+            {"mla_layer": mla, "odd_attn_layer": odd}
+        )
+
+
 def test_hma_not_disabled_when_kv_events_enabled():
     """
     Test enabling KV events must not force disable_hybrid_kv_cache_manager to True.

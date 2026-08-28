@@ -1075,15 +1075,37 @@ def unify_kv_cache_spec_page_size(
             assert new_spec.page_size_bytes == max_page_size
             new_kv_cache_spec[layer_name] = new_spec
         else:
-            layer_page_size = layer_spec.page_size_bytes
-            if max_page_size % layer_page_size == 0:
-                ratio = max_page_size // layer_page_size
+            is_plain_attention = isinstance(
+                layer_spec, AttentionSpec
+            ) and not isinstance(layer_spec, MLAAttentionSpec)
+            natural_page_size = (
+                layer_spec.unpadded_page_size_bytes
+                if is_plain_attention
+                else layer_spec.page_size_bytes
+            )
+            if max_page_size % natural_page_size == 0:
+                ratio = max_page_size // natural_page_size
                 new_block_size = layer_spec.block_size * ratio
-                new_spec = replace(layer_spec, block_size=new_block_size)
+                if is_plain_attention:
+                    new_spec = replace(
+                        layer_spec,
+                        block_size=new_block_size,
+                        page_size_padded=None,
+                    )
+                else:
+                    new_spec = replace(layer_spec, block_size=new_block_size)
             elif (
                 isinstance(layer_spec, AttentionSpec)
                 and layer_spec.indexes_kv_by_block_stride
             ):
+                ratio = max_page_size // natural_page_size
+                scaled = replace(
+                    layer_spec,
+                    block_size=layer_spec.block_size * ratio,
+                    page_size_padded=None,
+                )
+                if ratio > 1 and scaled.page_size_bytes <= max_page_size:
+                    layer_spec = scaled
                 new_spec = replace(layer_spec, page_size_padded=max_page_size)
             else:
                 raise NotImplementedError(
