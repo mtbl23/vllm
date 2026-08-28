@@ -159,6 +159,68 @@ def _dense_attention_reference(
     return torch.cat(outputs, dim=0)
 
 
+def _dequantize_nvfp4_sequences_from_cache(
+    *,
+    kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    kv_lens: list[int],
+    num_kv_heads: int,
+    head_size: int,
+    block_size: int,
+    k_scale: float,
+    v_scale: float,
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    """Reconstruct logical K/V sequences from the packed HND cache.
+
+    This is intentionally independent of FlashInfer's attention reader. It
+    decodes the bytes written by reshape_and_cache_flash and follows the
+    scheduler's logical-to-physical block table, so the attention oracle
+    measures kernel correctness rather than unavoidable NVFP4 quantization
+    loss against the original BF16 tensors.
+    """
+    from tests.kernels.quantization.nvfp4_utils import (
+        dequant_nvfp4_kv_cache,
+    )
+    from vllm.utils.torch_utils import nvfp4_split_data_scale
+
+    k_side, v_side = kv_cache.split(num_kv_heads, dim=1)
+    k_data, k_sf = nvfp4_split_data_scale(k_side)
+    v_data, v_sf = nvfp4_split_data_scale(v_side)
+    k_dequantized = dequant_nvfp4_kv_cache(
+        k_data,
+        k_sf,
+        k_scale,
+        head_size,
+        block_size,
+        swizzle_sf=False,
+    )
+    v_dequantized = dequant_nvfp4_kv_cache(
+        v_data,
+        v_sf,
+        v_scale,
+        head_size,
+        block_size,
+        swizzle_sf=False,
+    )
+
+    keys: list[torch.Tensor] = []
+    values: list[torch.Tensor] = []
+    for sequence_index, kv_len in enumerate(kv_lens):
+        num_blocks = (kv_len + block_size - 1) // block_size
+        physical_blocks = block_table[sequence_index, :num_blocks].long()
+        keys.append(
+            k_dequantized[physical_blocks]
+            .permute(0, 2, 1, 3)
+            .reshape(-1, num_kv_heads, head_size)[:kv_len]
+        )
+        values.append(
+            v_dequantized[physical_blocks]
+            .permute(0, 2, 1, 3)
+            .reshape(-1, num_kv_heads, head_size)[:kv_len]
+        )
+    return keys, values
+
+
 def _sm120_test_config(
     *,
     dtype: torch.dtype,
@@ -495,10 +557,20 @@ def _run_nvfp4_gemma4_production_path(
                 assert metadata.num_prefills == 0
                 assert isinstance(metadata.decode, FIDecode)
 
+        dequantized_keys, dequantized_values = _dequantize_nvfp4_sequences_from_cache(
+            kv_cache=kv_cache,
+            block_table=common.block_table_tensor,
+            kv_lens=kv_lens,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            block_size=page_size,
+            k_scale=layer._k_scale_float,
+            v_scale=layer._v_scale_float,
+        )
         expected = _dense_attention_reference(
             queries,
-            keys,
-            values,
+            dequantized_keys,
+            dequantized_values,
             scale=scale,
             sliding_window=sliding_window,
         )
@@ -517,10 +589,10 @@ def _run_nvfp4_gemma4_production_path(
         projected_gain = torch.sum(output.float() * expected.float()) / torch.sum(
             expected.float().square()
         )
-        assert relative_error.item() < 0.25
-        assert cosine_similarity.item() > 0.97
-        assert 0.90 < output_norm_ratio.item() < 1.10
-        assert 0.90 < projected_gain.item() < 1.10
+        assert relative_error.item() < 0.01
+        assert cosine_similarity.item() > 0.999
+        assert 0.99 < output_norm_ratio.item() < 1.01
+        assert 0.99 < projected_gain.item() < 1.01
     finally:
         set_kv_cache_layout(None)
         get_kv_cache_layout.cache_clear()
