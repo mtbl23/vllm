@@ -82,6 +82,7 @@ grep -Fq 'nvidia-cudnn-frontend==1.27.0' docker/Dockerfile
 grep -Fq 'nvidia-nccl-cu13==2.29.7' docker/Dockerfile
 grep -Fq 'ENV UV_OVERRIDE=/etc/uv-overrides-verse-sm120.txt' docker/Dockerfile
 grep -Fq 'deep_ep' docker/Dockerfile
+grep -Fq '        b12x \' docker/Dockerfile
 grep -Fq 'VLLM_VERSE_SM120_WHEEL=1' tools/verse/build_sm120_image.sh
 grep -Fq 'flashinfer-python @ https://github.com/flashinfer-ai/flashinfer/releases/download/nightly-v0.6.18-20260819/' \
   requirements/verse-sm120-wheel.txt

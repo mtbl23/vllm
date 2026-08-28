@@ -9,6 +9,8 @@ free-model runtime:
 - explicit HND physical KV layout
 - 6,144-token context
 - synchronous B01 scheduling with at most 38 active sequences
+- 256-token chunked-prefill batches, leaving 38-way decode capacity and KV reserve
+- FlashInfer's CUTLASS-4.7-compatible SM120 B12X backend for native W4A4 GEMM
 - prefix caching and the hybrid KV manager enabled
 - eager-only execution for the first correctness release
 

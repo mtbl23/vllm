@@ -168,4 +168,4 @@ CURRENT_STARTED_AT=$(uv run --no-project python -c \
 
 printf 'status=healthy\ncontainer_id=%s\nendpoint=%s\ncommit=%s\nprofile=%s\ngpu_uuid=%s\n' \
   "$CONTAINER_ID" "$ENDPOINT" "$VERSE_VLLM_EXPECTED_COMMIT" \
-  sm120-gemma4-nvfp4-v1 "$GPU_UUID"
+  sm120-gemma4-nvfp4-v2 "$GPU_UUID"

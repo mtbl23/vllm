@@ -1102,6 +1102,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     && test "$(uname -m)" = "x86_64" \
     && uv pip uninstall --system \
         deep_ep \
+        b12x \
         flashinfer-python \
         flashinfer-cubin \
         flashinfer-jit-cache \

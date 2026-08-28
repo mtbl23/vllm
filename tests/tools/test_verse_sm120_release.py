@@ -288,7 +288,7 @@ def server_record() -> str:
         "container=verse-vllm-sm120\n"
         "endpoint=http://127.0.0.1:8000\n"
         f"commit={FORK_COMMIT}\n"
-        "profile=sm120-gemma4-nvfp4-v1\n"
+        "profile=sm120-gemma4-nvfp4-v2\n"
     )
 
 

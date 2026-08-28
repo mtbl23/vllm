@@ -200,7 +200,7 @@ def validate_runtime_identity(args: argparse.Namespace) -> None:
             "schema_version": 1,
             "image": args.image,
             "fork_commit": args.expected_commit,
-            "profile": "sm120-gemma4-nvfp4-v1",
+            "profile": "sm120-gemma4-nvfp4-v2",
             "gpu_device": args.gpu_device,
             "gpu_uuid": args.gpu_uuid,
         },
@@ -240,7 +240,7 @@ def validate_container(container: dict[str, Any], args: argparse.Namespace) -> d
         "container has the wrong vLLM wheel version label",
     )
     require(
-        labels.get("ai.verse.runtime.profile") == "sm120-gemma4-nvfp4-v1",
+        labels.get("ai.verse.runtime.profile") == "sm120-gemma4-nvfp4-v2",
         "container has the wrong Verse runtime profile",
     )
     require(

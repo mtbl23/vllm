@@ -62,7 +62,7 @@ docker buildx build \
   --label org.opencontainers.image.revision="$COMMIT" \
   --label ai.verse.source.archive.sha256="$SOURCE_ARCHIVE_SHA256" \
   --label ai.verse.vllm.wheel.version="$VLLM_WHEEL_VERSION" \
-  --label ai.verse.runtime.profile=sm120-gemma4-nvfp4-v1 \
+  --label ai.verse.runtime.profile=sm120-gemma4-nvfp4-v2 \
   --label ai.verse.flashinfer.release=0.6.18.dev20260819 \
   --label ai.verse.flashinfer.manifest.sha256="$FLASHINFER_MANIFEST_SHA256" \
   --label ai.verse.base.build="$BUILD_BASE_IMAGE" \

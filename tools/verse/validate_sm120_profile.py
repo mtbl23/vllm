@@ -12,7 +12,7 @@ import shlex
 from pathlib import Path
 
 EXPECTED_PROFILE = {
-    "VERSE_PROFILE_VERSION": "1",
+    "VERSE_PROFILE_VERSION": "2",
     "VERSE_SERVED_MODEL_NAME": "verse-free",
     "VERSE_MODEL_REPOSITORY": "marak12/verse-campaign22-gemma4-12b-compact",
     "VERSE_MODEL_REVISION": "e2c6cd9c3302e91c032a378a607009c82ba16fac",
@@ -22,13 +22,13 @@ EXPECTED_PROFILE = {
     ),
     "VERSE_MAX_MODEL_LEN": "6144",
     "VERSE_MAX_NUM_SEQS": "38",
-    "VERSE_MAX_NUM_BATCHED_TOKENS": "512",
+    "VERSE_MAX_NUM_BATCHED_TOKENS": "256",
     "VERSE_GPU_MEMORY_UTILIZATION": "0.94",
     "VERSE_KV_CACHE_DTYPE": "nvfp4",
     "VERSE_KV_CACHE_LAYOUT": "HND",
     "VERSE_ATTENTION_BACKEND": "FLASHINFER",
     "VERSE_QUANTIZATION": "modelopt_fp4",
-    "VERSE_LINEAR_BACKEND": "b12x",
+    "VERSE_LINEAR_BACKEND": "flashinfer_b12x",
     "VERSE_COMPILATION_CONFIG": '{"cudagraph_mode":"NONE"}',
 }
 HEX40_RE = re.compile(r"[0-9a-f]{40}")

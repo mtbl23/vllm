@@ -63,7 +63,7 @@ EXPECTED_RUNTIME_BASE='nvidia/cuda:13.0.3-base-ubuntu24.04@sha256:97d085a7423ee1
   echo "candidate image has the wrong fork commit" >&2
   exit 1
 }
-[[ $IMAGE_PROFILE == sm120-gemma4-nvfp4-v1 ]] || {
+[[ $IMAGE_PROFILE == sm120-gemma4-nvfp4-v2 ]] || {
   echo "candidate image has the wrong Verse profile" >&2
   exit 1
 }

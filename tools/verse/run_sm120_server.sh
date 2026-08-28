@@ -242,7 +242,7 @@ EXPECTED_WHEEL_VERSION="0.28.0+verse.${VERSE_VLLM_EXPECTED_COMMIT:0:12}"
   echo "image commit $IMAGE_COMMIT does not match expected commit" >&2
   exit 1
 }
-[[ $IMAGE_PROFILE == sm120-gemma4-nvfp4-v1 ]] || {
+[[ $IMAGE_PROFILE == sm120-gemma4-nvfp4-v2 ]] || {
   echo "image is missing the Verse SM120 profile label" >&2
   exit 1
 }
@@ -291,7 +291,7 @@ payload = {
     "schema_version": 1,
     "image": sys.argv[2],
     "fork_commit": sys.argv[3],
-    "profile": "sm120-gemma4-nvfp4-v1",
+    "profile": "sm120-gemma4-nvfp4-v2",
     "gpu_device": sys.argv[4],
     "gpu_uuid": sys.argv[5],
 }

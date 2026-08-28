@@ -126,6 +126,11 @@ def main() -> int:
         not distributions.get("deep-ep"),
         "DeepEP must not be installed in the single-GPU Verse appliance",
     )
+    require(
+        not distributions.get("b12x"),
+        "standalone B12X must not be installed; the Verse appliance uses "
+        "FlashInfer's CUTLASS-4.7-compatible SM120 B12X backend",
+    )
     for name, version in EXPECTED_DISTRIBUTIONS.items():
         matches = distributions.get(normalized(name), [])
         require(len(matches) == 1, f"expected exactly one {name} distribution")

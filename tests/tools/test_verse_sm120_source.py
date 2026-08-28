@@ -337,6 +337,7 @@ def test_dockerfile_preserves_upstream_git_builds_and_archive_builds():
     assert "ENV UV_OVERRIDE=/etc/uv-overrides-verse-sm120.txt" in dockerfile
     assert "nvidia-nccl-cu13==2.29.7" in dockerfile
     assert "        deep_ep" in dockerfile
+    assert "        b12x" in dockerfile
 
 
 def test_setup_metadata_has_an_explicit_verse_runtime_dependency_contract():
@@ -353,7 +354,8 @@ def test_setup_metadata_has_an_explicit_verse_runtime_dependency_contract():
     ):
         assert package in requirements
     assert "quack-kernels" not in requirements
-    assert (
-        "verify_vllm_wheel_requirements"
-        in (SOURCE.parents[2] / "tools" / "verse" / "verify_sm120_image.py").read_text()
-    )
+    verifier = (
+        SOURCE.parents[2] / "tools" / "verse" / "verify_sm120_image.py"
+    ).read_text()
+    assert "verify_vllm_wheel_requirements" in verifier
+    assert 'not distributions.get("b12x")' in verifier
