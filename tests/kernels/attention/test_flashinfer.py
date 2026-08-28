@@ -553,9 +553,17 @@ def _run_nvfp4_gemma4_production_path(
                 assert isinstance(metadata.prefill, FIPrefill)
             else:
                 assert builder.vo_split == 1
-                assert metadata.num_decodes == len(query_lens)
-                assert metadata.num_prefills == 0
-                assert isinstance(metadata.decode, FIDecode)
+                expected_decodes = sum(
+                    query_len <= builder.reorder_batch_threshold
+                    for query_len in query_lens
+                )
+                expected_prefills = len(query_lens) - expected_decodes
+                assert metadata.num_decodes == expected_decodes
+                assert metadata.num_prefills == expected_prefills
+                assert isinstance(metadata.decode, FIDecode) == (expected_decodes > 0)
+                assert isinstance(metadata.prefill, FIPrefill) == (
+                    expected_prefills > 0
+                )
 
         dequantized_keys, dequantized_values = _dequantize_nvfp4_sequences_from_cache(
             kv_cache=kv_cache,
