@@ -10,6 +10,7 @@ import platform
 import re
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 from packaging.requirements import Requirement
@@ -30,6 +31,15 @@ EXPECTED_FLASHINFER_REQUIREMENT_URL = (
     "#sha256=50ad966220b5160f17fcb9e064bdfbcda726ec779fb0c74fd3449b3c48c66600"
 )
 VLLM_WHEEL_VERSION_RE = re.compile(r"0\.28\.0\+verse\.[0-9a-f]{12}")
+FORBIDDEN_RUNTIME_ENVIRONMENT_NAMES = frozenset(
+    {
+        "FLASHINFER_CUBIN_DIR",
+        "FLASHINFER_DISABLE_VERSION_CHECK",
+        "VLLM_BATCH_INVARIANT",
+        "VLLM_DISABLED_KERNELS",
+        "VLLM_TEST_FORCE_FP8_MARLIN",
+    }
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,6 +68,14 @@ def require(condition: bool, message: str) -> None:
         raise SystemExit(message)
 
 
+def verify_runtime_environment(environment: Mapping[str, str]) -> None:
+    for forbidden in sorted(FORBIDDEN_RUNTIME_ENVIRONMENT_NAMES):
+        require(
+            forbidden not in environment,
+            f"forbidden runtime environment: {forbidden}",
+        )
+
+
 def verify_vllm_wheel_requirements(
     distribution: importlib.metadata.Distribution,
 ) -> dict[str, str]:
@@ -69,7 +87,12 @@ def verify_vllm_wheel_requirements(
     def exactly_one(name: str) -> Requirement:
         matches = parsed.get(normalized(name), [])
         require(len(matches) == 1, f"expected exactly one {name} wheel requirement")
-        return matches[0]
+        requirement = matches[0]
+        require(
+            requirement.marker is None,
+            f"{name} wheel requirement must be unconditional: {requirement}",
+        )
+        return requirement
 
     flashinfer = exactly_one("flashinfer-python")
     require(
@@ -101,11 +124,7 @@ def main() -> int:
     args = parse_args()
     require(sys.version_info[:2] == (3, 12), "Verse image requires Python 3.12")
     require(platform.machine() == "x86_64", "Verse image requires x86_64")
-    for forbidden in ("FLASHINFER_DISABLE_VERSION_CHECK", "FLASHINFER_CUBIN_DIR"):
-        require(
-            not os.environ.get(forbidden),
-            f"forbidden override is set: {forbidden}",
-        )
+    verify_runtime_environment(os.environ)
 
     distributions = installed_distributions()
     paths: dict[str, str] = {}

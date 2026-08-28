@@ -2,16 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 ROOT = Path(__file__).parents[2]
 VALIDATOR = ROOT / "tools" / "verse" / "validate_sm120_container.py"
 RUNNER = ROOT / "tools" / "verse" / "run_sm120_server.sh"
 CHECKER = ROOT / "tools" / "verse" / "check_sm120_server.sh"
+IMAGE_VERIFIER = ROOT / "tools" / "verse" / "verify_sm120_image.py"
 COMMIT = "2" * 40
 CONTAINER_ID = "c" * 64
 IMAGE = f"registry/runtime@sha256:{'a' * 64}"
@@ -20,6 +25,28 @@ GPU_UUID = "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 MANIFEST_SHA256 = hashlib.sha256(
     (ROOT / "requirements/verse-sm120-flashinfer.lock").read_bytes()
 ).hexdigest()
+
+
+@pytest.fixture(scope="module")
+def image_verifier():
+    spec = importlib.util.spec_from_file_location(
+        "verse_sm120_image_verifier", IMAGE_VERIFIER
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def exact_vllm_wheel_requirements(image_verifier) -> list[str]:
+    flashinfer = (
+        "flashinfer-python @ " + image_verifier.EXPECTED_FLASHINFER_REQUIREMENT_URL
+    )
+    return [
+        flashinfer,
+        "nvidia-cutlass-dsl[cu13]==4.7.0",
+        "nvidia-cudnn-frontend==1.27.0",
+    ]
 
 
 def base_container(tmp_path: Path) -> tuple[dict, list[str]]:
@@ -300,6 +327,105 @@ def test_container_rejects_api_key_in_config(tmp_path: Path):
 
     assert result.returncode != 0
     assert "API key is exposed" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "environment_entry",
+    (
+        "FLASHINFER_CUBIN_DIR=/tmp/cubins",
+        "FLASHINFER_DISABLE_VERSION_CHECK=1",
+        "VLLM_BATCH_INVARIANT=0",
+        "VLLM_BATCH_INVARIANT=1",
+        "VLLM_DISABLED_KERNELS=FlashInferB12xNvFp4LinearKernel",
+        "VLLM_TEST_FORCE_FP8_MARLIN=1",
+    ),
+)
+def test_container_rejects_backend_changing_environment(
+    tmp_path: Path, environment_entry: str
+):
+    container, args = base_container(tmp_path)
+    container["Config"]["Env"].append(environment_entry)
+
+    result = run_validator(container, args)
+
+    name = environment_entry.split("=", 1)[0]
+    assert result.returncode != 0
+    assert f"forbidden runtime environment: {name}" in result.stderr
+
+
+def test_container_rejects_duplicate_environment_name(tmp_path: Path):
+    container, args = base_container(tmp_path)
+    container["Config"]["Env"].append("VLLM_VERSE_RUNTIME_STRICT=0")
+
+    result = run_validator(container, args)
+
+    assert result.returncode != 0
+    assert "duplicate runtime environment: VLLM_VERSE_RUNTIME_STRICT" in result.stderr
+
+
+def test_container_accepts_unrelated_inherited_environment(tmp_path: Path):
+    container, args = base_container(tmp_path)
+    container["Config"]["Env"].append("NVIDIA_VISIBLE_DEVICES=all")
+
+    result = run_validator(container, args)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_image_verifier_accepts_exact_unconditional_wheel_requirements(
+    image_verifier,
+):
+    requirements = exact_vllm_wheel_requirements(image_verifier)
+
+    verified = image_verifier.verify_vllm_wheel_requirements(
+        SimpleNamespace(requires=requirements)
+    )
+
+    assert set(verified) == {
+        "flashinfer-python",
+        "nvidia-cutlass-dsl",
+        "nvidia-cudnn-frontend",
+    }
+
+
+@pytest.mark.parametrize(
+    "requirement_index",
+    (0, 1, 2),
+    ids=("flashinfer", "cutlass", "cudnn"),
+)
+def test_image_verifier_rejects_markers_on_exact_wheel_requirements(
+    image_verifier, requirement_index: int
+):
+    requirements = exact_vllm_wheel_requirements(image_verifier)
+    separator = " ; " if " @ " in requirements[requirement_index] else "; "
+    requirements[requirement_index] += f"{separator}python_version < '0'"
+
+    with pytest.raises(SystemExit, match="wheel requirement must be unconditional"):
+        image_verifier.verify_vllm_wheel_requirements(
+            SimpleNamespace(requires=requirements)
+        )
+
+
+@pytest.mark.parametrize(
+    "environment_name",
+    (
+        "FLASHINFER_CUBIN_DIR",
+        "FLASHINFER_DISABLE_VERSION_CHECK",
+        "VLLM_BATCH_INVARIANT",
+        "VLLM_DISABLED_KERNELS",
+        "VLLM_TEST_FORCE_FP8_MARLIN",
+    ),
+)
+def test_image_verifier_rejects_backend_changing_environment(
+    image_verifier, environment_name: str
+):
+    message = f"forbidden runtime environment: {environment_name}"
+    with pytest.raises(SystemExit, match=message):
+        image_verifier.verify_runtime_environment({environment_name: ""})
+
+
+def test_image_verifier_accepts_unrelated_environment(image_verifier):
+    image_verifier.verify_runtime_environment({"NVIDIA_VISIBLE_DEVICES": "all"})
 
 
 def test_container_rejects_vllm_wheel_version_drift(tmp_path: Path):

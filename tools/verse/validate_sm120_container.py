@@ -33,6 +33,15 @@ GPU_UUID_RE = re.compile(
     r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
 )
 CONTAINER_ID_RE = re.compile(r"[0-9a-f]{64}")
+FORBIDDEN_RUNTIME_ENVIRONMENT_NAMES = frozenset(
+    {
+        "FLASHINFER_CUBIN_DIR",
+        "FLASHINFER_DISABLE_VERSION_CHECK",
+        "VLLM_BATCH_INVARIANT",
+        "VLLM_DISABLED_KERNELS",
+        "VLLM_TEST_FORCE_FP8_MARLIN",
+    }
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,6 +69,21 @@ def parse_args() -> argparse.Namespace:
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise SystemExit(message)
+
+
+def parse_environment(raw_environment: object) -> dict[str, str]:
+    require(isinstance(raw_environment, list), "container environment is not a list")
+    environment: dict[str, str] = {}
+    for item in raw_environment:
+        require(
+            isinstance(item, str) and "=" in item,
+            "container environment contains a malformed entry",
+        )
+        name, value = item.split("=", 1)
+        require(bool(name), "container environment contains an empty name")
+        require(name not in environment, f"duplicate runtime environment: {name}")
+        environment[name] = value
+    return environment
 
 
 def expected_model_path() -> str:
@@ -278,30 +302,39 @@ def validate_container(container: dict[str, Any], args: argparse.Namespace) -> d
         "container command does not exactly match the fixed profile",
     )
 
-    environment = set(config.get("Env") or [])
-    for required in (
-        "VLLM_API_KEY_FILE=/run/secrets/vllm_api_key",
-        f"VERSE_VLLM_WHEEL_VERSION={expected_wheel_version}",
-        "UV_OVERRIDE=/etc/uv-overrides-verse-sm120.txt",
-        "VLLM_VERSE_RUNTIME_STRICT=1",
-        "VLLM_NVFP4_KV_VOSPLIT=1",
-        "VLLM_KV_CACHE_LAYOUT=HND",
-        "VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0",
-        "VLLM_USE_FLASHINFER_SAMPLER=0",
-        "FLASHINFER_WORKSPACE_BASE=/cache/flashinfer",
-        "CUDA_CACHE_PATH=/cache/cuda",
-        "TORCH_HOME=/cache/torch",
-        "TORCH_EXTENSIONS_DIR=/cache/torch-extensions",
-        "TORCHINDUCTOR_CACHE_DIR=/cache/torchinductor",
-        "HF_HOME=/cache/huggingface",
-        "VLLM_CACHE_ROOT=/cache/vllm",
-        "TRITON_CACHE_DIR=/cache/triton",
-        "XDG_CACHE_HOME=/cache/xdg",
-        "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR=/cache/flashinfer-autotune",
-    ):
-        require(required in environment, f"missing runtime environment: {required}")
+    environment = parse_environment(config.get("Env"))
+    required_environment = {
+        "VLLM_API_KEY_FILE": "/run/secrets/vllm_api_key",
+        "VERSE_VLLM_WHEEL_VERSION": expected_wheel_version,
+        "UV_OVERRIDE": "/etc/uv-overrides-verse-sm120.txt",
+        "VLLM_VERSE_RUNTIME_STRICT": "1",
+        "VLLM_NVFP4_KV_VOSPLIT": "1",
+        "VLLM_KV_CACHE_LAYOUT": "HND",
+        "VLLM_PREFIX_CACHE_RETENTION_INTERVAL": "0",
+        "VLLM_USE_FLASHINFER_SAMPLER": "0",
+        "FLASHINFER_WORKSPACE_BASE": "/cache/flashinfer",
+        "CUDA_CACHE_PATH": "/cache/cuda",
+        "TORCH_HOME": "/cache/torch",
+        "TORCH_EXTENSIONS_DIR": "/cache/torch-extensions",
+        "TORCHINDUCTOR_CACHE_DIR": "/cache/torchinductor",
+        "HF_HOME": "/cache/huggingface",
+        "VLLM_CACHE_ROOT": "/cache/vllm",
+        "TRITON_CACHE_DIR": "/cache/triton",
+        "XDG_CACHE_HOME": "/cache/xdg",
+        "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": "/cache/flashinfer-autotune",
+    }
+    for name, expected_value in required_environment.items():
+        require(
+            environment.get(name) == expected_value,
+            f"wrong or missing runtime environment: {name}",
+        )
+    for forbidden in sorted(FORBIDDEN_RUNTIME_ENVIRONMENT_NAMES):
+        require(
+            forbidden not in environment,
+            f"forbidden runtime environment: {forbidden}",
+        )
     require(
-        not any(item.startswith("VLLM_API_KEY=") for item in environment),
+        "VLLM_API_KEY" not in environment,
         "API key is exposed in Docker configuration",
     )
 
