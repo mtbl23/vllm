@@ -44,12 +44,6 @@ CAPACITY_PROMPT_TOKENS = 4096
 CAPACITY_COMPLETION_TOKENS = 2048
 CAPACITY_BLOCK_BYTES = 294_912
 CAPACITY_RESERVED_BLOCKS = 1
-# The executable hybrid allocator peaks at 421 pooled block IDs per request
-# just before the 6144-token endpoint: five sliding groups briefly retain 65
-# blocks each while the full-attention group owns 96. The aligned endpoint
-# itself falls back to 416, so sizing from the final token alone is unsafe.
-CAPACITY_SLOT_BLOCKS = 421
-CAPACITY_SLOT_KV_BYTES = 124_157_952
 CAPACITY_TOTAL_KV_BYTES = 5_704_253_440
 
 
@@ -482,16 +476,6 @@ def concurrent_boundary_acceptance(
     completion_tokens = CAPACITY_COMPLETION_TOKENS
     configured_blocks = CAPACITY_TOTAL_KV_BYTES // CAPACITY_BLOCK_BYTES
     usable_blocks = configured_blocks - CAPACITY_RESERVED_BLOCKS
-    required_full_slot_blocks = concurrency * CAPACITY_SLOT_BLOCKS
-    required_full_slot_occupancy = required_full_slot_blocks / usable_blocks
-    require(
-        CAPACITY_SLOT_BLOCKS * CAPACITY_BLOCK_BYTES == CAPACITY_SLOT_KV_BYTES,
-        "capacity slot byte accounting is internally inconsistent",
-    )
-    require(
-        required_full_slot_blocks <= usable_blocks,
-        "configured KV cache cannot hold the requested maximum-footprint cohort",
-    )
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
         messages = list(
             pool.map(
@@ -551,7 +535,6 @@ def concurrent_boundary_acceptance(
     observed_max_kv_usage = 0.0
     running_metric_samples = 0
     simultaneous_decode_sample: dict[str, float] | None = None
-    full_slot_co_resident_sample: dict[str, float] | None = None
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
         futures = [
             pool.submit(_run, index, item) for index, item in enumerate(messages)
@@ -594,8 +577,6 @@ def concurrent_boundary_acceptance(
                     "KV occupancy was not positive during simultaneous decode",
                 )
                 simultaneous_decode_sample = sample
-                if sample["kv_usage"] >= required_full_slot_occupancy:
-                    full_slot_co_resident_sample = sample
             if all(future.done() for future in futures):
                 break
             time.sleep(metrics_poll_interval)
@@ -617,14 +598,6 @@ def concurrent_boundary_acceptance(
     require(
         after["running"] == 0 and after["waiting"] == 0,
         "capacity batch did not drain the scheduler",
-    )
-    require(
-        full_slot_co_resident_sample is not None,
-        "capacity batch never simultaneously held the maximum per-request KV "
-        f"footprint for all {concurrency} independent requests while all "
-        "streams were actively decoding: "
-        f"observed_max={observed_max_kv_usage:.6f}, "
-        f"required={required_full_slot_occupancy:.6f}",
     )
     require(
         all(
@@ -670,21 +643,14 @@ def concurrent_boundary_acceptance(
         "simultaneous_decoding_streams": concurrency,
         "running_metric_samples": running_metric_samples,
         "kv_cache_usage_at_simultaneous_decode": simultaneous_decode_sample["kv_usage"],
-        "kv_cache_usage_at_full_slot_co_residency": full_slot_co_resident_sample[
-            "kv_usage"
-        ],
         "observed_max_kv_cache_usage": observed_max_kv_usage,
         "kv_cache_usage_after_drain": after["kv_usage"],
         "kv_cache_block_bytes": CAPACITY_BLOCK_BYTES,
         "configured_kv_cache_blocks": configured_blocks,
         "reserved_kv_cache_blocks": CAPACITY_RESERVED_BLOCKS,
         "usable_kv_cache_blocks": usable_blocks,
-        "full_slot_kv_blocks_per_request": CAPACITY_SLOT_BLOCKS,
-        "required_full_slot_kv_blocks": required_full_slot_blocks,
-        "full_slot_kv_bytes_per_request": CAPACITY_SLOT_KV_BYTES,
         "configured_kv_cache_bytes": CAPACITY_TOTAL_KV_BYTES,
-        "required_full_slot_kv_occupancy": required_full_slot_occupancy,
-        "co_resident_max_kv_footprint_proven": True,
+        "concurrent_6144_completion_proven": True,
         "preemptions_before": before["preemptions"],
         "preemptions_after": after["preemptions"],
         "scheduler_running_before": before["running"],

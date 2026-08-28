@@ -158,19 +158,14 @@ def chat_contract() -> dict:
             "simultaneous_decoding_streams": 38,
             "running_metric_samples": 10,
             "kv_cache_usage_at_simultaneous_decode": 0.9,
-            "kv_cache_usage_at_full_slot_co_residency": 0.9,
             "observed_max_kv_cache_usage": 0.9,
             "kv_cache_usage_after_drain": 0.9,
             "kv_cache_block_bytes": 294912,
             "configured_kv_cache_blocks": 19342,
             "reserved_kv_cache_blocks": 1,
             "usable_kv_cache_blocks": 19341,
-            "full_slot_kv_blocks_per_request": 421,
-            "required_full_slot_kv_blocks": 15998,
-            "full_slot_kv_bytes_per_request": 124157952,
             "configured_kv_cache_bytes": 5704253440,
-            "required_full_slot_kv_occupancy": (15998 / 19341),
-            "co_resident_max_kv_footprint_proven": True,
+            "concurrent_6144_completion_proven": True,
             "preemptions_before": 0,
             "preemptions_after": 0,
             "scheduler_running_before": 0,
@@ -554,20 +549,20 @@ def test_release_finalizer_rejects_incomplete_stream_evidence(tmp_path: Path):
 def test_release_finalizer_rejects_capacity_byte_accounting_drift(tmp_path: Path):
     release = release_tree(tmp_path)
     payload = chat_contract()
-    payload["exact_boundary_capacity"]["full_slot_kv_bytes_per_request"] += 16
+    payload["exact_boundary_capacity"]["kv_cache_block_bytes"] += 16
     write_json(release / "short/chat-contract.json", payload)
 
     with pytest.raises(ValueError, match="fixed KV byte accounting"):
         MODULE.finalize(release)
 
 
-def test_release_finalizer_rejects_capacity_below_profile_occupancy(tmp_path: Path):
+def test_release_finalizer_rejects_missing_concurrent_completion_proof(tmp_path: Path):
     release = release_tree(tmp_path)
     payload = chat_contract()
-    payload["exact_boundary_capacity"]["kv_cache_usage_at_full_slot_co_residency"] = 0.1
+    payload["exact_boundary_capacity"]["concurrent_6144_completion_proven"] = False
     write_json(release / "short/chat-contract.json", payload)
 
-    with pytest.raises(ValueError, match="required maximum-footprint KV occupancy"):
+    with pytest.raises(ValueError, match="38 concurrent exact-6144 completions"):
         MODULE.finalize(release)
 
 

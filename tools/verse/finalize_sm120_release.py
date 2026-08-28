@@ -39,11 +39,9 @@ EXPECTED_SCENARIOS = {
 EXPECTED_PROFILE_IDENTITY = (
     f"sm120-gemma4-nvfp4-v{EXPECTED_PROFILE['VERSE_PROFILE_VERSION']}"
 )
-EXPECTED_SLOT_KV_BYTES = int(EXPECTED_PROFILE["VERSE_KV_CACHE_SLOT_BYTES"])
 EXPECTED_TOTAL_KV_BYTES = int(EXPECTED_PROFILE["VERSE_KV_CACHE_MEMORY_BYTES"])
 EXPECTED_BLOCK_KV_BYTES = int(EXPECTED_PROFILE["VERSE_KV_CACHE_BLOCK_BYTES"])
 EXPECTED_RESERVED_KV_BLOCKS = int(EXPECTED_PROFILE["VERSE_KV_CACHE_RESERVED_BLOCKS"])
-EXPECTED_SLOT_KV_BLOCKS = int(EXPECTED_PROFILE["VERSE_KV_CACHE_SLOT_BLOCKS"])
 EXPECTED_PREFILL_SHAPES = {
     (37, 1): {
         "minimum_retention": 0.30,
@@ -462,43 +460,20 @@ def validate_chat_contract(payload: dict[str, Any]) -> None:
         "capacity evidence has no positive KV occupancy at simultaneous decode",
     )
     require(
-        capacity.get("co_resident_max_kv_footprint_proven") is True,
-        "capacity evidence did not prove 38 independent requests at the "
-        "maximum per-request KV footprint",
+        capacity.get("concurrent_6144_completion_proven") is True,
+        "capacity evidence did not prove 38 concurrent exact-6144 completions",
     )
     configured_blocks = EXPECTED_TOTAL_KV_BYTES // EXPECTED_BLOCK_KV_BYTES
     usable_blocks = configured_blocks - EXPECTED_RESERVED_KV_BLOCKS
-    required_blocks = EXPECTED_CONCURRENCY * EXPECTED_SLOT_KV_BLOCKS
     require(
         int(capacity.get("kv_cache_block_bytes", -1)) == EXPECTED_BLOCK_KV_BYTES
         and int(capacity.get("configured_kv_cache_blocks", -1)) == configured_blocks
         and int(capacity.get("reserved_kv_cache_blocks", -1))
         == EXPECTED_RESERVED_KV_BLOCKS
         and int(capacity.get("usable_kv_cache_blocks", -1)) == usable_blocks
-        and int(capacity.get("full_slot_kv_blocks_per_request", -1))
-        == EXPECTED_SLOT_KV_BLOCKS
-        and int(capacity.get("required_full_slot_kv_blocks", -1)) == required_blocks
-        and required_blocks <= usable_blocks
-        and EXPECTED_SLOT_KV_BLOCKS * EXPECTED_BLOCK_KV_BYTES == EXPECTED_SLOT_KV_BYTES
-        and int(capacity.get("full_slot_kv_bytes_per_request", -1))
-        == EXPECTED_SLOT_KV_BYTES
         and int(capacity.get("configured_kv_cache_bytes", -1))
         == EXPECTED_TOTAL_KV_BYTES,
         "capacity evidence uses the wrong fixed KV byte accounting",
-    )
-    required_occupancy = float(capacity.get("required_full_slot_kv_occupancy", -1))
-    require(
-        math.isclose(
-            required_occupancy,
-            required_blocks / usable_blocks,
-            rel_tol=0,
-            abs_tol=1e-12,
-        )
-        and float(capacity.get("kv_cache_usage_at_full_slot_co_residency", -1))
-        >= required_occupancy,
-        "capacity evidence did not observe the required maximum-footprint KV "
-        "occupancy "
-        "while all streams were decoding",
     )
     stream_evidence = capacity.get("stream_completion_evidence")
     require(

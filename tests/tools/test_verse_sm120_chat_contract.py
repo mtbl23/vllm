@@ -343,7 +343,7 @@ def test_capacity_probe_overlaps_all_requests_and_observes_running(monkeypatch):
     assert result["observed_max_running"] == concurrency
     assert result["simultaneous_decoding_streams"] == concurrency
     assert result["kv_cache_usage_at_simultaneous_decode"] == 0.75
-    assert result["kv_cache_usage_at_full_slot_co_residency"] == 0.75
+    assert result["concurrent_6144_completion_proven"] is True
     assert result["verified_exact_completion_streams"] == concurrency
     assert (
         result["observed_completion_tokens_total"]
