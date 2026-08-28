@@ -99,11 +99,9 @@ def _vllm_nvfp4_kv_vosplit_requested() -> bool:
     """VLLM_NVFP4_KV_VOSPLIT opts head_size > 256 NVFP4 layers into the FA2
     two-pass VO split (Gemma 4 global D=512 full-attention layers).
 
-    Default-on (see vllm/envs.py); only an explicit "0" disables it. The
-    model-config routing (vllm/model_executor/models/config.py) gates the
-    Gemma 4 -> FLASHINFER decision on the same flag, so the backend must
-    honor it here too."""
-    return bool(envs.VLLM_NVFP4_KV_VOSPLIT)
+    The Verse fork keeps this route opt-in and fail-closed. The model-config
+    admission gate validates the rest of the fixed serving tuple."""
+    return bool(envs.VLLM_VERSE_RUNTIME_STRICT and envs.VLLM_NVFP4_KV_VOSPLIT)
 
 
 def _vo_split_factor(head_size: int, is_fa2_nvfp4: bool) -> int:
@@ -120,15 +118,14 @@ def _vo_split_factor(head_size: int, is_fa2_nvfp4: bool) -> int:
     the 512-wide V cache (and, for NVFP4, of its per-16-element scale
     factors).
 
-    The split is dtype-independent (the guard counts only accumulator
-    fragments). For NVFP4 it additionally requires linear (non-swizzled)
-    V scale factors, which the sm12x cache writer stores, so the V data
-    and scale views slice cleanly along the head dim; the trtllm-gen
-    4-token V-scale swizzle does not commute with head-dim slicing.
+    This helper deliberately leaves every non-strict FlashInfer route alone.
+    The production proof and cache-layout invariant cover only the exact
+    strict SM120 FA2 NVFP4 tuple; applying the split to generic 512-wide
+    FlashInfer attention would silently reroute unrelated models.
     """
-    if head_size <= 256:
+    if not is_fa2_nvfp4 or head_size <= 256:
         return 1
-    if is_fa2_nvfp4 and not _vllm_nvfp4_kv_vosplit_requested():
+    if not _vllm_nvfp4_kv_vosplit_requested():
         raise ValueError(
             f"NVFP4 KV with head_size={head_size} on the SM12x FA2 path "
             "needs the two-pass VO split (the FA2 kernel caps HEAD_DIM_VO "
@@ -136,10 +133,10 @@ def _vo_split_factor(head_size: int, is_fa2_nvfp4: bool) -> int:
             "these layers on a different KV dtype."
         )
     split = -(-head_size // 256)  # ceil(head_size / 256)
-    if head_size % split != 0 or (is_fa2_nvfp4 and (head_size // split) % 16 != 0):
+    if head_size % split != 0 or (head_size // split) % 16 != 0:
         raise ValueError(
             "The VO split needs head_size divisible into <=256-wide chunks"
-            f"{' of whole 16-element scale blocks' if is_fa2_nvfp4 else ''}; "
+            " of whole 16-element scale blocks; "
             f"got head_size={head_size}."
         )
     return split
@@ -567,11 +564,17 @@ class FlashInferBackend(AttentionBackend):
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
         if kv_cache_dtype is not None and kv_cache_dtype.startswith("nvfp4"):
-            # Consumer Blackwell (sm120/sm121): NVFP4 KV is served through
-            # the FlashInfer FA2 paged reader (uint8 fp4 cache), no
-            # trtllm-gen requirement. Mirrors the builder __init__ gate.
-            if current_platform.is_device_capability_family(120):
+            # The strict Verse SM120 profile uses the FlashInfer FA2 paged
+            # reader. Other SM12x configurations remain unsupported here.
+            capability = current_platform.get_device_capability()
+            if (
+                capability is not None
+                and capability.to_int() == 120
+                and _vllm_nvfp4_kv_vosplit_requested()
+            ):
                 return True
+            if capability is not None and capability.major == 12:
+                return False
             return (
                 current_platform.is_device_capability_family(100)
                 and supports_trtllm_attention(is_prefill=True)
@@ -617,17 +620,18 @@ class FlashInferBackend(AttentionBackend):
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:
-        # Text-mode is fully correct (no image spans to mask). Span-level
-        # bidirectional masking for image inputs is the separate mm-prefix
-        # concern; for NVFP4-KV text serving this gate must not reject FA2.
-        return True
+        # FlashInfer's paged path does not implement the span-level
+        # bidirectional mask used by multimodal-prefix attention. Text-only
+        # serving never asks for this capability, so fail closed for every
+        # configuration instead of admitting a silent wrong-mask route.
+        return False
 
     @classmethod
     def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
         capability = current_platform.get_device_capability()
         if capability is not None and capability.major == 10:
             return "HND"
-        # NVFP4 KV on consumer Blackwell (sm120/sm121, FA2 path): each K/V
+        # NVFP4 KV on the strict Verse SM120 FA2 path: each K/V
         # side of the cache packs [data | scale] regions carved out of the
         # side's byte range (reshape_and_cache_nvfp4 writes the scales at
         # side_base + num_heads * block_size * data_dim;
@@ -640,12 +644,16 @@ class FlashInferBackend(AttentionBackend):
         # the ambient vllm config (same pattern as
         # get_kv_connector_cache_layout); if the hook grows a dtype-aware
         # signature, this decision moves into it.
-        if capability is not None and capability.major == 12:
+        if (
+            capability is not None
+            and capability.to_int() == 120
+            and _vllm_nvfp4_kv_vosplit_requested()
+        ):
             vllm_config = get_current_vllm_config_or_none()
             if (
                 vllm_config is not None
                 and vllm_config.cache_config is not None
-                and vllm_config.cache_config.cache_dtype.startswith("nvfp4")
+                and vllm_config.cache_config.cache_dtype == "nvfp4"
             ):
                 return "HND"
         return None
@@ -881,8 +889,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.is_kvcache_nvfp4 = self.cache_dtype.startswith("nvfp4")
             self.use_fa2_nvfp4_kv = False
             if self.is_kvcache_nvfp4:
-                if current_platform.is_device_capability_family(120):
-                    # Consumer Blackwell (sm120/sm121): no trtllm-gen FP4 FMHA,
+                capability = current_platform.get_device_capability()
+                if (
+                    capability is not None
+                    and capability.to_int() == 120
+                    and _vllm_nvfp4_kv_vosplit_requested()
+                ):
+                    # The strict Verse SM120 path has no trtllm-gen FP4 FMHA,
                     # so route NVFP4 KV through FlashInfer's FA2 paged reader.
                     # The cache stores packed uint8 fp4 data; the per-side
                     # [data | scale] regions are read back as views with
@@ -891,6 +904,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     self.kv_cache_dtype = FlashInferBackend.get_dtype_for_flashinfer(
                         "nvfp4"
                     )
+                elif capability is not None and capability.major == 12:
+                    raise ValueError(
+                        "SM12x NVFP4 KV through FlashInfer FA2 is available only "
+                        "under the fixed strict Verse SM120 profile."
+                    )
                 elif (
                     force_use_trtllm_attention() is False
                     or not supports_trtllm_attention(is_prefill=True)
@@ -898,8 +916,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 ):
                     raise ValueError(
                         f"--kv-cache-dtype {self.cache_dtype} requires the "
-                        "SM100 trtllm-gen FlashInfer path or consumer "
-                        "Blackwell (sm120/sm121)."
+                        "SM100 trtllm-gen FlashInfer path or the strict "
+                        "Verse SM120 profile."
                     )
                 else:
                     # sm100 trtllm-gen. The scale search only affects the
@@ -918,22 +936,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             assert self.kv_cache_spec.dtype == self.model_config.dtype
             self.kv_cache_dtype = self.kv_cache_spec.dtype
 
-        if self.is_kvcache_nvfp4 and not (
-            self.kv_cache_layout.is_block_compact
-            and self.kv_cache_layout.is_block_contiguous
-        ):
-            # The NVFP4 per-side [data | scale] carve (reshape_and_cache_nvfp4
-            # writes scales at side_base + num_heads * block_size * data_dim;
-            # nvfp4_split_data_scale reads them back with derived strides) is
-            # only byte-coherent when each page's [H, N, C] bytes form one
-            # contiguous head-major run. Test the resolved layout itself, not
-            # its FlashInfer nickname: BHLNC also reports "HND" but is neither
-            # block-compact nor block-contiguous, and would silently corrupt
-            # the cache. See FlashInferBackend.supported_kv_cache_layouts.
+        if self.is_kvcache_nvfp4 and get_kv_cache_layout() != "HND":
             raise ValueError(
-                "NVFP4 KV cache requires a block-compact, head-major KV cache "
-                f"layout; resolved layout is {self.kv_cache_layout.name!r}. "
-                "Unset VLLM_KV_CACHE_LAYOUT or set it to 'HND' (LBHNC)."
+                "NVFP4 KV cache requires the explicit physical HND layout."
             )
 
         # Compute per-phase Q dtype.  On SM90 (XQA decode), the prefill and
@@ -976,7 +981,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.use_fa2_nvfp4_kv
             and self.flashinfer_trtllm_api_decode_kernel is not None
         ):
-            # NVFP4 KV on consumer Blackwell is served by the FlashInfer FA2
+            # NVFP4 KV on the strict Verse SM120 path is served by FlashInfer FA2
             # paged reader; neither the dedicated-XQA nor the trtllm-gen decode
             # API accepts the packed fp4 cache (FlashInferImpl.forward asserts
             # on it). Upstream selects dedicated XQA on sm12x regardless of KV
@@ -985,7 +990,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # measurement on this PR was taken on, and XQA benchmarked 0.7-1.2%
             # slower at equal cudagraph mode (#49818), so nothing is lost.
             logger.info_once(
-                "NVFP4 KV cache on consumer Blackwell uses the FlashInfer FA2 "
+                "NVFP4 KV cache on strict Verse SM120 uses the FlashInfer FA2 "
                 "paged decode path; disabling the %s decode API.",
                 self.flashinfer_trtllm_api_decode_kernel.value,
             )
@@ -1017,6 +1022,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # head_dim_qk=512). vo_split == 1 leaves all existing paths
         # untouched.
         self.vo_split = _vo_split_factor(self.head_dim, self.use_fa2_nvfp4_kv)
+        if self.use_fa2_nvfp4_kv:
+            if self.use_dcp:
+                raise ValueError(
+                    "The Verse SM120 NVFP4 FA2 path does not support decode "
+                    "context parallelism."
+                )
+            # FlashInfer's NVFP4 FA2 reader is empirically incorrect with
+            # split-KV for short-query/long-context work. The pinned nightly
+            # also forces this internally, but keep it as an explicit vLLM
+            # invariant so a dependency change cannot silently re-enable the
+            # corrupt route.
+            self.disable_split_kv = True
         if self.vo_split > 1:
             # BatchDecodeWithPagedKVCacheWrapper.plan() has no head_dim_vo,
             # so route every request through the VO-split-planned prefill
@@ -1025,7 +1042,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.reorder_batch_threshold = 0
             logger.info_once(
                 "FA2 VO split (%s KV): head_size %d runs as %d passes of "
-                "head_dim_vo=%d; decode requests use the prefill wrapper.",
+                "head_dim_vo=%d; decode requests use the prefill wrapper and "
+                "split-KV is disabled.",
                 self.cache_dtype,
                 self.head_dim,
                 self.vo_split,
@@ -1124,7 +1142,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             return self.model_config.dtype
         if cache_dtype.startswith("nvfp4"):
             if current_platform.is_device_capability_family(120):
-                # The FA2 paged nvfp4 reader (consumer Blackwell) consumes
+                # The strict Verse SM120 FA2 paged NVFP4 reader consumes
                 # model-dtype queries; FP8-Q is a trtllm-gen-only contract.
                 return self.model_config.dtype
             return FlashInferBackend.get_dtype_for_flashinfer("fp8_e4m3")
@@ -1157,19 +1175,20 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
         is_sm12x = current_platform.is_device_capability_family(120)
-        # XQA does not return LSE and therefore does not support DCP.
-        if is_sm12x and vllm_config.parallel_config.decode_context_parallel_size > 1:
-            return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-
-        # NVFP4 KV on SM120 decodes through the native FA2 path. The XQA API
-        # rejects the packed FP4 cache, and this FA2 path currently supports
-        # only single-token uniform graph capture.
+        # NVFP4 KV on SM120 decodes through a native FA2 prefill wrapper. That
+        # wrapper does not yet own graph-stable metadata buffers, so advertising
+        # graph support can hang capture or replay with stale page metadata.
         cache_config = vllm_config.cache_config
         if (
             is_sm12x
+            and _vllm_nvfp4_kv_vosplit_requested()
             and cache_config is not None
-            and cache_config.cache_dtype.startswith("nvfp4")
+            and cache_config.cache_dtype == "nvfp4"
         ):
+            return AttentionCGSupport.NEVER
+
+        # XQA does not return LSE and therefore does not support DCP.
+        if is_sm12x and vllm_config.parallel_config.decode_context_parallel_size > 1:
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
         # For UniformTypeKVCacheSpecs, check all contained specs
@@ -1352,10 +1371,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         window_left=self.window_left,
                     )
                 else:
-                    # NVFP4 KV: FlashInfer FA2 paged reader on consumer
-                    # Blackwell (sm120/sm121); trtllm-gen on sm100f.
+                    # Strict Verse SM120 uses the FlashInfer FA2 paged reader;
+                    # trtllm-gen remains the sm100f path.
                     if self.use_fa2_nvfp4_kv:
                         backend = "fa2"
+                        logger.info_once(
+                            "Using the FlashInfer FA2 paged wrapper for strict "
+                            "Verse SM120 NVFP4 HND KV."
+                        )
                     elif self.is_kvcache_nvfp4:
                         backend = "trtllm-gen"
                     else:
@@ -1383,8 +1406,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 paged_kv_indptr = None
                 paged_kv_indices = None
                 paged_kv_last_page_len = None
-            # NVFP4 KV: FlashInfer FA2 paged reader on consumer Blackwell
-            # (sm120/sm121); trtllm-gen on sm100f.
+            # NVFP4 KV: FlashInfer FA2 paged reader on strict Verse SM120
+            # trtllm-gen remains the sm100f path.
             if self.use_fa2_nvfp4_kv:
                 backend = "fa2"
             elif self.is_kvcache_nvfp4:
@@ -1960,8 +1983,12 @@ class FlashInferImpl(AttentionImpl):
         self.cache_dtype = kv_cache_dtype
         self.is_kvcache_nvfp4 = kv_cache_dtype.startswith("nvfp4")
         self.kv_cache_dtype = "nvfp4" if self.is_kvcache_nvfp4 else kv_cache_dtype
-        self.use_fa2_nvfp4_kv = (
-            self.is_kvcache_nvfp4 and current_platform.is_device_capability_family(120)
+        capability = current_platform.get_device_capability()
+        self.use_fa2_nvfp4_kv = bool(
+            self.is_kvcache_nvfp4
+            and capability is not None
+            and capability.to_int() == 120
+            and _vllm_nvfp4_kv_vosplit_requested()
         )
         self.fp4_data_dim = head_size // 2 if self.is_kvcache_nvfp4 else 0
         # Two-pass VO split factor for head_size > 256 (Gemma 4 D=512); 1

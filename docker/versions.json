@@ -61,6 +61,9 @@
     "GIT_REPO_CHECK": {
       "default": "0"
     },
+    "GIT_REPO_MOUNT_SOURCE": {
+      "default": ".git"
+    },
     "VLLM_MAX_SIZE_MB": {
       "default": "500"
     },

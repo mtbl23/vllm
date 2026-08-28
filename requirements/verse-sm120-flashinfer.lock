@@ -1,0 +1,5 @@
+# FlashInfer nightly after asymmetric NVFP4 qk512/vo256 support landed.
+# Each release asset is pinned by its GitHub-provided SHA-256 digest.
+flashinfer-python @ https://github.com/flashinfer-ai/flashinfer/releases/download/nightly-v0.6.18-20260819/flashinfer_python-0.6.18.dev20260819-py3-none-any.whl#sha256=50ad966220b5160f17fcb9e064bdfbcda726ec779fb0c74fd3449b3c48c66600
+flashinfer-cubin @ https://github.com/flashinfer-ai/flashinfer/releases/download/nightly-v0.6.18-20260819/flashinfer_cubin-0.6.18.dev20260819-py3-none-any.whl#sha256=277c3f2ef478dd8da5f315f21c3ce56c4437dbb47b170ceb4b47185f9c46560b
+flashinfer-jit-cache @ https://github.com/flashinfer-ai/flashinfer/releases/download/nightly-v0.6.18-20260819/flashinfer_jit_cache-0.6.18.dev20260819%2Bcu130-cp39-abi3-manylinux_2_28_x86_64.whl#sha256=6c44aabbe7f225b97a546f92fe65b51cbd4ef83838026e4a5d6d6d35486d2ea1

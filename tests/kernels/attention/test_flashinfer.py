@@ -2,6 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import os
+import unittest.mock
+from types import SimpleNamespace
+
 import pytest
 
 from vllm.platforms import current_platform
@@ -61,7 +65,7 @@ def ref_paged_attn(
             k = torch.repeat_interleave(k, q.shape[1] // k.shape[1], dim=1)
             v = torch.repeat_interleave(v, q.shape[1] // v.shape[1], dim=1)
         attn = torch.einsum("qhd,khd->hqk", q, k).float()
-        empty_mask = torch.ones(query_len, kv_len)
+        empty_mask = torch.ones(query_len, kv_len, device=q.device)
         mask = torch.triu(empty_mask, diagonal=kv_len - query_len + 1).bool()
         if sliding_window is not None:
             sliding_window_mask = (
@@ -117,6 +121,456 @@ def _make_paged_kv_metadata(
         torch.tensor(indices_list, dtype=torch.int32, device="cuda"),
         torch.tensor(last_lens_list, dtype=torch.int32, device="cpu"),
         block_tables,
+    )
+
+
+def _dense_attention_reference(
+    queries: list[torch.Tensor],
+    keys: list[torch.Tensor],
+    values: list[torch.Tensor],
+    *,
+    scale: float,
+    sliding_window: int | None,
+) -> torch.Tensor:
+    """Compute attention from source tensors, independently of the KV cache."""
+    outputs: list[torch.Tensor] = []
+    for query, key, value in zip(queries, keys, values, strict=True):
+        if query.shape[1] != key.shape[1]:
+            repeats = query.shape[1] // key.shape[1]
+            key = key.repeat_interleave(repeats, dim=1)
+            value = value.repeat_interleave(repeats, dim=1)
+
+        query_len = query.shape[0]
+        kv_len = key.shape[0]
+        query_positions = torch.arange(kv_len - query_len, kv_len, device=query.device)
+        key_positions = torch.arange(kv_len, device=query.device)
+        allowed = key_positions.unsqueeze(0) <= query_positions.unsqueeze(1)
+        if sliding_window is not None:
+            allowed &= key_positions.unsqueeze(0) >= (
+                query_positions.unsqueeze(1) - (sliding_window - 1)
+            )
+
+        scores = torch.einsum("qhd,khd->hqk", query.float(), key.float()) * scale
+        scores.masked_fill_(~allowed.unsqueeze(0), float("-inf"))
+        probabilities = torch.softmax(scores, dim=-1)
+        outputs.append(
+            torch.einsum("hqk,khd->qhd", probabilities, value.float()).to(query.dtype)
+        )
+    return torch.cat(outputs, dim=0)
+
+
+def _sm120_test_config(
+    *,
+    dtype: torch.dtype,
+    num_q_heads: int,
+) -> SimpleNamespace:
+    from vllm.config import CUDAGraphMode
+
+    model_config = SimpleNamespace(
+        dtype=dtype,
+        max_model_len=6144,
+        get_num_attention_heads=lambda _parallel_config: num_q_heads,
+    )
+    return SimpleNamespace(
+        model_config=model_config,
+        cache_config=SimpleNamespace(cache_dtype="nvfp4"),
+        attention_config=SimpleNamespace(
+            disable_flashinfer_q_quantization=False,
+            use_trtllm_attention=False,
+        ),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.NONE,
+            max_cudagraph_capture_size=None,
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=512,
+            max_num_seqs=38,
+        ),
+        speculative_config=None,
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            dcp_kv_cache_interleave_size=1,
+            dcp_comm_backend="allgather",
+        ),
+        use_v2_model_runner=False,
+    )
+
+
+def _make_common_attention_metadata(
+    *,
+    query_lens: list[int],
+    kv_lens: list[int],
+    block_size: int,
+    device: torch.device,
+):
+    """Build only the scheduler metadata needed by the production-path oracle."""
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+
+    num_reqs = len(query_lens)
+    query_start_loc = torch.zeros(num_reqs + 1, dtype=torch.int32, device=device)
+    query_start_loc[1:] = torch.tensor(
+        query_lens, dtype=torch.int32, device=device
+    ).cumsum(0)
+    query_start_loc_cpu = query_start_loc.cpu()
+
+    seq_lens = torch.tensor(kv_lens, dtype=torch.int32, device=device)
+    seq_lens_cpu = seq_lens.cpu()
+    num_computed_tokens_cpu = torch.tensor(
+        [kv_len - query_len for query_len, kv_len in zip(query_lens, kv_lens)],
+        dtype=torch.int32,
+    )
+
+    max_blocks_per_request = (max(kv_lens) + block_size - 1) // block_size
+    block_table_tensor = torch.arange(
+        num_reqs * max_blocks_per_request,
+        dtype=torch.int32,
+        device=device,
+    ).view(num_reqs, max_blocks_per_request)
+    # Scheduler-assigned physical pages are not monotonic in production after
+    # churn. Reverse every row and rotate request ownership so the oracle will
+    # fail if the kernel accidentally treats logical block positions as
+    # physical page IDs. Physical pages remain unique across live requests.
+    block_table_tensor = torch.roll(block_table_tensor.flip(1), shifts=1, dims=0)
+    num_actual_tokens = sum(query_lens)
+
+    return CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc_cpu,
+        seq_lens=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens_cpu,
+        _seq_lens_cpu=seq_lens_cpu,
+        _num_computed_tokens_cpu=num_computed_tokens_cpu,
+        num_reqs=num_reqs,
+        num_actual_tokens=num_actual_tokens,
+        max_query_len=max(query_lens),
+        max_seq_len=max(kv_lens),
+        block_table_tensor=block_table_tensor,
+        slot_mapping=torch.zeros(
+            num_actual_tokens,
+            dtype=torch.int64,
+            device=device,
+        ),
+        causal=True,
+    )
+
+
+def _run_nvfp4_gemma4_production_path(
+    *,
+    query_lens: list[int],
+    kv_lens: list[int],
+    head_size: int,
+    sliding_window: int | None,
+) -> None:
+    """Exercise MetadataBuilder -> cache update -> FlashInferImpl.forward."""
+    from vllm.config import set_current_vllm_config
+    from vllm.utils.torch_utils import nvfp4_kv_cache_full_dim
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+    from vllm.v1.attention.backends.flashinfer import (
+        FIDecode,
+        FIPrefill,
+        FlashInferImpl,
+        FlashInferMetadataBuilder,
+    )
+    from vllm.v1.attention.backends.utils import (
+        PerLayerParameters,
+        get_kv_cache_layout,
+        set_kv_cache_layout,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
+
+    assert len(query_lens) == len(kv_lens)
+    assert all(query_len <= kv_len for query_len, kv_len in zip(query_lens, kv_lens))
+
+    set_random_seed(0)
+    device = torch.device("cuda")
+    dtype = torch.bfloat16
+    page_size = 16
+    num_q_heads = 8
+    num_kv_heads = 4
+    scale = head_size**-0.5
+    common = _make_common_attention_metadata(
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        block_size=page_size,
+        device=device,
+    )
+
+    queries: list[torch.Tensor] = []
+    keys: list[torch.Tensor] = []
+    values: list[torch.Tensor] = []
+    for query_len, kv_len in zip(query_lens, kv_lens, strict=True):
+        queries.append(
+            torch.randn(
+                query_len,
+                num_q_heads,
+                head_size,
+                dtype=dtype,
+                device=device,
+            )
+        )
+        keys.append(
+            torch.randn(
+                kv_len,
+                num_kv_heads,
+                head_size,
+                dtype=dtype,
+                device=device,
+            )
+        )
+        values.append(0.25 * torch.randn_like(keys[-1]))
+
+    query = torch.cat(queries, dim=0)
+    key = torch.cat(
+        [
+            tensor[-query_len:]
+            for tensor, query_len in zip(keys, query_lens, strict=True)
+        ],
+        dim=0,
+    )
+    value = torch.cat(
+        [
+            tensor[-query_len:]
+            for tensor, query_len in zip(values, query_lens, strict=True)
+        ],
+        dim=0,
+    )
+    k_scale = torch.stack([tensor.abs().amax() for tensor in keys]).amax() / 448.0
+    v_scale = torch.stack([tensor.abs().amax() for tensor in values]).amax() / 448.0
+    layer = SimpleNamespace(
+        _q_scale=torch.tensor(1.0, dtype=torch.float32, device=device),
+        _k_scale=k_scale.float(),
+        _v_scale=v_scale.float(),
+        _q_scale_float=1.0,
+        _k_scale_float=k_scale.float().item(),
+        _v_scale_float=v_scale.float().item(),
+        _o_scale_float=None,
+    )
+
+    config = _sm120_test_config(dtype=dtype, num_q_heads=num_q_heads)
+    kv_cache_spec = FullAttentionSpec(
+        block_size=page_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=torch.uint8,
+        kv_quant_mode=KVQuantMode.NVFP4,
+        sliding_window=sliding_window,
+    )
+    layer_names = ["test_layer"]
+    window_left = sliding_window - 1 if sliding_window is not None else -1
+
+    def per_layer_parameters(*_args, **_kwargs):
+        return {
+            layer_names[0]: PerLayerParameters(
+                window_left=window_left,
+                logits_soft_cap=0.0,
+                sm_scale=scale,
+            )
+        }
+
+    def slots_for(sequence_index: int, start: int, count: int) -> torch.Tensor:
+        offsets = torch.arange(start, start + count, device=device)
+        blocks = common.block_table_tensor[sequence_index, offsets // page_size].long()
+        return blocks * page_size + offsets % page_size
+
+    query_cursor = 0
+    for sequence_index, (query_len, kv_len) in enumerate(
+        zip(query_lens, kv_lens, strict=True)
+    ):
+        common.slot_mapping[query_cursor : query_cursor + query_len] = slots_for(
+            sequence_index, kv_len - query_len, query_len
+        )
+        query_cursor += query_len
+
+    num_blocks = int(common.block_table_tensor.max().item()) + 1
+    kv_cache = torch.zeros(
+        num_blocks,
+        2 * num_kv_heads,
+        page_size,
+        nvfp4_kv_cache_full_dim(head_size),
+        dtype=torch.uint8,
+        device=device,
+    )
+
+    set_kv_cache_layout("HND")
+    get_kv_cache_layout.cache_clear()
+    try:
+        with (
+            unittest.mock.patch.dict(
+                os.environ,
+                {
+                    "VLLM_VERSE_RUNTIME_STRICT": "1",
+                    "VLLM_NVFP4_KV_VOSPLIT": "1",
+                },
+            ),
+            set_current_vllm_config(config),
+            unittest.mock.patch.object(
+                flashinfer_backend,
+                "can_use_trtllm_attention",
+                return_value=True,
+            ) as can_use_trtllm_mock,
+            unittest.mock.patch.object(
+                flashinfer_backend,
+                "use_trtllm_attention",
+                return_value=False,
+            ),
+            unittest.mock.patch.object(
+                flashinfer_backend,
+                "get_num_attention_heads_from_layers",
+                return_value=num_q_heads,
+            ),
+            unittest.mock.patch.object(
+                flashinfer_backend,
+                "get_per_layer_parameters",
+                side_effect=per_layer_parameters,
+            ),
+        ):
+            builder = FlashInferMetadataBuilder(
+                kv_cache_spec,
+                layer_names,
+                config,
+                device,
+            )
+            implementation = FlashInferImpl(
+                num_heads=num_q_heads,
+                head_size=head_size,
+                scale=scale,
+                num_kv_heads=num_kv_heads,
+                alibi_slopes=None,
+                sliding_window=sliding_window,
+                kv_cache_dtype="nvfp4",
+            )
+
+            for sequence_index, (query_len, key_full, value_full) in enumerate(
+                zip(query_lens, keys, values, strict=True)
+            ):
+                context_len = key_full.shape[0] - query_len
+                if context_len:
+                    implementation.do_kv_cache_update(
+                        layer,
+                        key_full[:context_len],
+                        value_full[:context_len],
+                        kv_cache,
+                        slots_for(sequence_index, 0, context_len),
+                    )
+
+            metadata = builder.build(
+                common_prefix_len=0,
+                common_attn_metadata=common,
+            )
+            implementation.do_kv_cache_update(
+                layer,
+                key,
+                value,
+                kv_cache,
+                metadata.slot_mapping,
+            )
+            output = implementation.forward(
+                layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                metadata,
+                output=torch.empty_like(query),
+            )
+
+            assert builder.use_fa2_nvfp4_kv
+            assert builder.disable_split_kv
+            # Exact SM120 normally advertises dedicated XQA. The strict packed
+            # NVFP4 path must observe that availability and then deliberately
+            # clear it in favor of the native FA2 reader before execution.
+            assert can_use_trtllm_mock.call_count >= 1
+            assert builder.flashinfer_trtllm_api_decode_kernel is None
+            assert not builder.use_trtllm_decode_attention
+            assert not builder.use_dedicated_xqa
+            if head_size > 256:
+                assert builder.vo_split == 2
+                assert builder.reorder_batch_threshold == 0
+                assert metadata.num_decodes == 0
+                assert metadata.num_prefills == len(query_lens)
+                assert isinstance(metadata.prefill, FIPrefill)
+            else:
+                assert builder.vo_split == 1
+                assert metadata.num_decodes == len(query_lens)
+                assert metadata.num_prefills == 0
+                assert isinstance(metadata.decode, FIDecode)
+
+        expected = _dense_attention_reference(
+            queries,
+            keys,
+            values,
+            scale=scale,
+            sliding_window=sliding_window,
+        )
+        assert torch.isfinite(output).all()
+        relative_error = torch.linalg.vector_norm(
+            output.float() - expected.float()
+        ) / torch.linalg.vector_norm(expected.float())
+        cosine_similarity = torch.nn.functional.cosine_similarity(
+            output.float().flatten(),
+            expected.float().flatten(),
+            dim=0,
+        )
+        output_norm_ratio = torch.linalg.vector_norm(output.float()) / (
+            torch.linalg.vector_norm(expected.float())
+        )
+        projected_gain = torch.sum(output.float() * expected.float()) / torch.sum(
+            expected.float().square()
+        )
+        assert relative_error.item() < 0.25
+        assert cosine_similarity.item() > 0.97
+        assert 0.90 < output_norm_ratio.item() < 1.10
+        assert 0.90 < projected_gain.item() < 1.10
+    finally:
+        set_kv_cache_layout(None)
+        get_kv_cache_layout.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("query_lens", "kv_lens"),
+    [
+        ([1, 5], [33, 47]),
+        ([1, 5], [1000, 5500]),
+        ([1], [6144]),
+        ([512], [1024]),
+    ],
+)
+@torch.inference_mode()
+def test_flashinfer_fa2_nvfp4_gemma4_vo_split_hnd_matches_reference(
+    query_lens: list[int], kv_lens: list[int]
+) -> None:
+    capability = torch.cuda.get_device_capability()
+    if capability != (12, 0):
+        pytest.skip("requires exact SM120")
+
+    _run_nvfp4_gemma4_production_path(
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        head_size=512,
+        sliding_window=None,
+    )
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize(
+    ("query_lens", "kv_lens"),
+    [
+        ([1, 1, 1], [1000, 5500, 6144]),
+        ([16, 64], [1000, 5500]),
+    ],
+)
+def test_flashinfer_fa2_nvfp4_gemma4_sliding_hnd_matches_reference(
+    query_lens: list[int], kv_lens: list[int]
+) -> None:
+    capability = torch.cuda.get_device_capability()
+    if capability != (12, 0):
+        pytest.skip("requires exact SM120")
+
+    _run_nvfp4_gemma4_production_path(
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        head_size=256,
+        sliding_window=1024,
     )
 
 

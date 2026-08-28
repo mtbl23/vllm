@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Static (no-GPU) routing check for Gemma 4 NVFP4 KV -> FLASHINFER.
 
-On consumer Blackwell (CC 12.x) the FlashInfer FA2 asymmetric paged
+On exact SM120 the FlashInfer FA2 asymmetric paged
 kernel serves Gemma 4 heterogeneous-head full-attention layers
 (head_dim_qk=512, head_dim_vo=256) directly, so Gemma4Config must route
 NVFP4-KV configs to FLASHINFER instead of the TRITON_ATTN fallback.
@@ -18,7 +18,11 @@ import pytest
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-ALL_KNOBS = ("VLLM_NVFP4_KV_VOSPLIT", "VLLM_VERSE_RUNTIME_STRICT")
+ALL_KNOBS = (
+    "VLLM_KV_CACHE_LAYOUT",
+    "VLLM_NVFP4_KV_VOSPLIT",
+    "VLLM_VERSE_RUNTIME_STRICT",
+)
 
 CC12_0 = DeviceCapability(12, 0)
 CC12_1 = DeviceCapability(12, 1)
@@ -47,7 +51,7 @@ class _FakeArchConfig:
         return SimpleNamespace(head_size=self._head_sizes[index])
 
 
-_LAYER_TYPES = [
+_LAYER_CYCLE = [
     "sliding_attention",
     "sliding_attention",
     "sliding_attention",
@@ -55,22 +59,69 @@ _LAYER_TYPES = [
     "sliding_attention",
     "full_attention",
 ]
+_LAYER_TYPES = _LAYER_CYCLE * 8
 
 
 def _mock_vllm_config(
-    *, backend=None, cache_dtype="nvfp4", head_dim=256, global_head_dim=512
+    *,
+    backend=None,
+    backend_per_kind=None,
+    cache_dtype="nvfp4",
+    kv_cache_dtype_skip_layers=None,
+    head_dim=256,
+    global_head_dim=512,
+    quantization="modelopt_fp4",
+    layer_types=None,
+    language_model_only=True,
+    max_model_len=6144,
+    max_num_seqs=38,
+    max_num_batched_tokens=512,
+    enforce_eager=True,
+    async_scheduling=False,
+    speculative=False,
+    tensor_parallel_size=1,
+    kv_offloading_size=None,
+    sliding_window=1024,
+    disable_sliding_window=False,
 ):
+    layer_types = list(layer_types or _LAYER_TYPES)
     head_sizes = [
-        global_head_dim if lt == "full_attention" else head_dim for lt in _LAYER_TYPES
+        global_head_dim if lt == "full_attention" else head_dim for lt in layer_types
     ]
     return SimpleNamespace(
-        attention_config=SimpleNamespace(backend=backend, flash_attn_version=None),
+        attention_config=SimpleNamespace(
+            backend=backend,
+            backend_per_kind=backend_per_kind or {},
+            flash_attn_version=None,
+        ),
         cache_config=SimpleNamespace(
-            cache_dtype=cache_dtype, kv_cache_dtype_skip_layers=None
+            cache_dtype=cache_dtype,
+            kv_cache_dtype_skip_layers=kv_cache_dtype_skip_layers or [],
+            kv_offloading_size=kv_offloading_size,
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=max_num_seqs,
+            max_num_batched_tokens=max_num_batched_tokens,
+            async_scheduling=async_scheduling,
+        ),
+        speculative_config=SimpleNamespace() if speculative else None,
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=tensor_parallel_size,
+            pipeline_parallel_size=1,
+            data_parallel_size=1,
+            decode_context_parallel_size=1,
         ),
         model_config=SimpleNamespace(
             model_arch_config=_FakeArchConfig(head_sizes),
-            hf_text_config=SimpleNamespace(layer_types=list(_LAYER_TYPES)),
+            hf_text_config=SimpleNamespace(
+                layer_types=layer_types,
+                sliding_window=sliding_window,
+            ),
+            quantization=quantization,
+            multimodal_config=SimpleNamespace(language_model_only=language_model_only),
+            max_model_len=max_model_len,
+            enforce_eager=enforce_eager,
+            disable_sliding_window=disable_sliding_window,
         ),
     )
 
@@ -119,16 +170,21 @@ def _gemma4_route(vllm_config):
     return vllm_config.attention_config.backend
 
 
+def _enable_strict_verse(monkeypatch):
+    monkeypatch.setenv("VLLM_VERSE_RUNTIME_STRICT", "1")
+    monkeypatch.setenv("VLLM_KV_CACHE_LAYOUT", "HND")
+    monkeypatch.setenv("VLLM_NVFP4_KV_VOSPLIT", "1")
+
+
 @pytest.mark.parametrize("capability", [CC12_0, CC12_1])
-def test_nvfp4_cc12_routes_to_flashinfer(fake_cc, capability):
+def test_nvfp4_cc12_does_not_enable_verse_route_by_default(fake_cc, capability):
     fake_cc(capability)
     cfg = _mock_vllm_config()
-    backend = _gemma4_route(cfg)
-    assert backend == AttentionBackendEnum.FLASHINFER, backend
+    assert _gemma4_route(cfg) == AttentionBackendEnum.TRITON_ATTN
 
 
-def test_nvfp4_cc12_disabled_knob_falls_back_to_triton(fake_cc, monkeypatch):
-    monkeypatch.setenv("VLLM_NVFP4_KV_VOSPLIT", "0")
+def test_nvfp4_cc12_opt_in_without_strict_profile_does_not_route(fake_cc, monkeypatch):
+    monkeypatch.setenv("VLLM_NVFP4_KV_VOSPLIT", "1")
     fake_cc(CC12_0)
     cfg = _mock_vllm_config()
     assert _gemma4_route(cfg) == AttentionBackendEnum.TRITON_ATTN
@@ -153,7 +209,7 @@ def test_bf16_kv_keeps_triton_fallback(fake_cc):
 
 
 def test_strict_verse_runtime_routes_supported_tuple(fake_cc, monkeypatch):
-    monkeypatch.setenv("VLLM_VERSE_RUNTIME_STRICT", "1")
+    _enable_strict_verse(monkeypatch)
     fake_cc(CC12_0)
     assert _gemma4_route(_mock_vllm_config()) == AttentionBackendEnum.FLASHINFER
 
@@ -161,8 +217,9 @@ def test_strict_verse_runtime_routes_supported_tuple(fake_cc, monkeypatch):
 @pytest.mark.parametrize(
     "capability,cache_dtype,backend,head_dim,global_head_dim,error",
     [
-        (CC9_0, "nvfp4", None, 256, 512, "compute capability 12.x"),
-        (CC12_0, "auto", None, 256, 512, "NVFP4 KV cache"),
+        (CC9_0, "nvfp4", None, 256, 512, "exact compute capability SM120"),
+        (CC12_1, "nvfp4", None, 256, 512, "exact compute capability SM120"),
+        (CC12_0, "auto", None, 256, 512, "kv-cache-dtype nvfp4"),
         (
             CC12_0,
             "nvfp4",
@@ -171,8 +228,8 @@ def test_strict_verse_runtime_routes_supported_tuple(fake_cc, monkeypatch):
             512,
             "FLASHINFER attention backend",
         ),
-        (CC12_0, "nvfp4", None, 128, 512, "mixed 256/512"),
-        (CC12_0, "nvfp4", None, 256, 256, "mixed 256/512"),
+        (CC12_0, "nvfp4", None, 128, 512, "48-layer pattern"),
+        (CC12_0, "nvfp4", None, 256, 256, "48-layer pattern"),
     ],
 )
 def test_strict_verse_runtime_rejects_unsupported_tuple(
@@ -185,7 +242,7 @@ def test_strict_verse_runtime_rejects_unsupported_tuple(
     global_head_dim,
     error,
 ):
-    monkeypatch.setenv("VLLM_VERSE_RUNTIME_STRICT", "1")
+    _enable_strict_verse(monkeypatch)
     fake_cc(capability)
     cfg = _mock_vllm_config(
         backend=backend,
@@ -198,8 +255,88 @@ def test_strict_verse_runtime_rejects_unsupported_tuple(
 
 
 def test_strict_verse_runtime_requires_vo_split(fake_cc, monkeypatch):
-    monkeypatch.setenv("VLLM_VERSE_RUNTIME_STRICT", "1")
+    _enable_strict_verse(monkeypatch)
     monkeypatch.setenv("VLLM_NVFP4_KV_VOSPLIT", "0")
     fake_cc(CC12_0)
     with pytest.raises(ValueError, match="VLLM_NVFP4_KV_VOSPLIT=1"):
         _gemma4_route(_mock_vllm_config())
+
+
+@pytest.mark.parametrize(
+    "sliding_window,disable_sliding_window,error",
+    [
+        (None, False, "sliding_window=1024"),
+        (2048, False, "sliding_window=1024"),
+        (1024, True, "remain enabled"),
+    ],
+)
+def test_strict_verse_runtime_pins_sliding_attention_mask(
+    fake_cc,
+    monkeypatch,
+    sliding_window,
+    disable_sliding_window,
+    error,
+):
+    _enable_strict_verse(monkeypatch)
+    fake_cc(CC12_0)
+    with pytest.raises(ValueError, match=error):
+        _gemma4_route(
+            _mock_vllm_config(
+                sliding_window=sliding_window,
+                disable_sliding_window=disable_sliding_window,
+            )
+        )
+
+
+def test_strict_verse_runtime_requires_nvfp4_weights(fake_cc, monkeypatch):
+    _enable_strict_verse(monkeypatch)
+    fake_cc(CC12_0)
+    with pytest.raises(ValueError, match="ModelOpt NVFP4"):
+        _gemma4_route(_mock_vllm_config(quantization="compressed-tensors"))
+
+
+def test_strict_verse_runtime_requires_text_only_loading(fake_cc, monkeypatch):
+    _enable_strict_verse(monkeypatch)
+    fake_cc(CC12_0)
+    with pytest.raises(ValueError, match="text-only loading"):
+        _gemma4_route(_mock_vllm_config(language_model_only=False))
+
+
+def test_strict_verse_runtime_requires_hnd_layout(fake_cc, monkeypatch):
+    _enable_strict_verse(monkeypatch)
+    monkeypatch.setenv("VLLM_KV_CACHE_LAYOUT", "NHD")
+    fake_cc(CC12_0)
+    with pytest.raises(ValueError, match="VLLM_KV_CACHE_LAYOUT=HND"):
+        _gemma4_route(_mock_vllm_config())
+
+
+@pytest.mark.parametrize(
+    "overrides,error",
+    [
+        ({"max_model_len": 8192}, "max_model_len=6144"),
+        ({"max_num_seqs": 40}, "max_num_seqs=38"),
+        ({"max_num_batched_tokens": 1024}, "max_num_batched_tokens=512"),
+        ({"async_scheduling": True}, "synchronous B01"),
+        ({"speculative": True}, "speculative decoding"),
+        ({"tensor_parallel_size": 2}, "TP1/PP1/DP1/DCP1"),
+        ({"kv_offloading_size": 8.0}, "KV offload"),
+        ({"enforce_eager": False}, "--enforce-eager"),
+        (
+            {"kv_cache_dtype_skip_layers": ["sliding_attention"]},
+            "dtype skip layers",
+        ),
+        (
+            {"backend_per_kind": {"sliding_window_attention": "TRITON_ATTN"}},
+            "per-kind attention backend",
+        ),
+        ({"cache_dtype": "nvfp4_4over6"}, "kv-cache-dtype nvfp4"),
+        ({"layer_types": _LAYER_TYPES[:-1]}, "48-layer pattern"),
+    ],
+)
+def test_strict_verse_runtime_requires_fixed_serving_tuple(
+    fake_cc, monkeypatch, overrides, error
+):
+    _enable_strict_verse(monkeypatch)
+    fake_cc(CC12_0)
+    with pytest.raises(ValueError, match=error):
+        _gemma4_route(_mock_vllm_config(**overrides))

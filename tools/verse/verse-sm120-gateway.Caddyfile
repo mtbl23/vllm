@@ -1,0 +1,57 @@
+{
+	admin off
+	auto_https off
+	log {
+		output discard
+	}
+}
+
+http://127.0.0.1:8080 {
+	request_body {
+		max_size 4MB
+	}
+
+	@health {
+		method GET HEAD
+		path /health
+	}
+	@models {
+		method GET HEAD
+		path /v1/models
+	}
+	@tokenize {
+		method POST
+		path /tokenize
+	}
+	@chat {
+		method POST
+		path /v1/chat/completions
+	}
+
+	handle @health {
+		reverse_proxy 127.0.0.1:8000 {
+			header_down -Server
+			flush_interval -1
+		}
+	}
+	handle @models {
+		reverse_proxy 127.0.0.1:8000 {
+			header_down -Server
+			flush_interval -1
+		}
+	}
+	handle @tokenize {
+		reverse_proxy 127.0.0.1:8000 {
+			header_down -Server
+			flush_interval -1
+		}
+	}
+	handle @chat {
+		reverse_proxy 127.0.0.1:8000 {
+			header_down -Server
+			flush_interval -1
+		}
+	}
+
+	respond 404
+}

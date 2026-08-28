@@ -501,7 +501,10 @@ COPY --from=rust-build /workspace/vllm/vllm-rs vllm/vllm-rs
 COPY --from=rust-build /workspace/vllm/_rust_*.so vllm/
 
 ARG GIT_REPO_CHECK=0
-RUN --mount=type=bind,source=.git,target=.git \
+ARG GIT_REPO_MOUNT_SOURCE=.git
+ARG VLLM_VERSION_OVERRIDE
+ENV VLLM_VERSION_OVERRIDE=${VLLM_VERSION_OVERRIDE}
+RUN --mount=type=bind,source=${GIT_REPO_MOUNT_SOURCE},target=.git \
     if [ "$GIT_REPO_CHECK" != "0" ]; then bash tools/check_repo.sh ; fi
 
 ARG vllm_target_device="cuda"
@@ -518,7 +521,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 
 # Build the vLLM wheel
 RUN --mount=type=cache,target=/opt/uv/cache \
-    --mount=type=bind,source=.git,target=.git \
+    --mount=type=bind,source=${GIT_REPO_MOUNT_SOURCE},target=.git \
     if [ "${vllm_target_device}" = "cuda" ]; then \
         export VLLM_USE_PRECOMPILED=1; \
         export VLLM_PRECOMPILED_WHEEL_LOCATION=$(ls /precompiled-wheels/*.whl); \
@@ -1071,6 +1074,69 @@ FROM vllm-openai-base AS vllm-openai
 # See docs/deployment/docker.md.
 # USER vllm
 ENTRYPOINT ["vllm", "serve"]
+
+FROM vllm-openai AS vllm-openai-verse-sm120
+ARG CUDA_VERSION
+ARG VLLM_VERSION_OVERRIDE
+COPY requirements/verse-sm120-flashinfer.lock \
+    /opt/verse/requirements/verse-sm120-flashinfer.lock
+COPY tools/verse/verify_sm120_image.py \
+    /usr/local/bin/verify-verse-sm120-image
+COPY tools/verse/prepare_sm120_model.py \
+    /opt/verse-tools/prepare_sm120_model.py
+COPY tools/verse/validate_sm120_profile.py \
+    /opt/verse-tools/validate_sm120_profile.py
+COPY tools/verse/sm120_profile.env \
+    /opt/verse-tools/sm120_profile.env
+COPY docker/entrypoints/verse-sm120-entrypoint.sh \
+    /usr/local/bin/verse-sm120-entrypoint.sh
+RUN --mount=type=cache,target=/opt/uv/cache \
+    test "${CUDA_VERSION}" = "13.0.3" \
+    && printf '%s\n' "${VLLM_VERSION_OVERRIDE}" | \
+        grep -Eq '^0\.28\.0\+verse\.[0-9a-f]{12}$' \
+    && test "$(uname -m)" = "x86_64" \
+    && uv pip uninstall --system \
+        flashinfer-python \
+        flashinfer-cubin \
+        flashinfer-jit-cache \
+        quack-kernels \
+        nvidia-cutlass-dsl \
+        nvidia-cudnn-frontend \
+    && uv pip install --system \
+        -r /opt/verse/requirements/verse-sm120-flashinfer.lock \
+        'nvidia-cutlass-dsl[cu13]==4.7.0' \
+        nvidia-cudnn-frontend==1.27.0 \
+        pytest==9.1.0 \
+    && uv pip check --system \
+    && chmod 0755 \
+        /usr/local/bin/verify-verse-sm120-image \
+        /usr/local/bin/verse-sm120-entrypoint.sh \
+        /opt/verse-tools/prepare_sm120_model.py \
+        /opt/verse-tools/validate_sm120_profile.py
+COPY tests/__init__.py /opt/verse-tests/tests/__init__.py
+COPY tests/kernels/__init__.py /opt/verse-tests/tests/kernels/__init__.py
+COPY tests/kernels/attention/test_flashinfer.py \
+    /opt/verse-tests/tests/kernels/attention/test_flashinfer.py
+COPY tests/kernels/quantization/nvfp4_utils.py \
+    /opt/verse-tests/tests/kernels/quantization/nvfp4_utils.py
+COPY tests/v1/attention/test_gemma4_nvfp4_flashinfer_routing.py \
+    /opt/verse-tests/tests/v1/attention/test_gemma4_nvfp4_flashinfer_routing.py
+COPY tests/v1/attention/test_nvfp4_flashinfer_vosplit.py \
+    /opt/verse-tests/tests/v1/attention/test_nvfp4_flashinfer_vosplit.py
+ENV VERSE_VLLM_WHEEL_VERSION=${VLLM_VERSION_OVERRIDE} \
+    VLLM_VERSE_RUNTIME_STRICT=1 \
+    VLLM_NVFP4_KV_VOSPLIT=1 \
+    VLLM_KV_CACHE_LAYOUT=HND \
+    VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0 \
+    VLLM_USE_FLASHINFER_SAMPLER=0 \
+    FLASHINFER_WORKSPACE_BASE=/cache/flashinfer \
+    CUDA_CACHE_PATH=/cache/cuda \
+    TORCH_HOME=/cache/torch \
+    TORCH_EXTENSIONS_DIR=/cache/torch-extensions \
+    TORCHINDUCTOR_CACHE_DIR=/cache/torchinductor
+USER 2000:0
+WORKDIR /home/vllm
+ENTRYPOINT ["/usr/local/bin/verse-sm120-entrypoint.sh"]
 #################### OPENAI API SERVER ####################
 
 #################### OPENAI API SERVER (NON-ROOT, OPT-IN) ####################

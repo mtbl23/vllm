@@ -197,6 +197,9 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
 
 
 class Gemma4Config(VerifyAndUpdateConfig):
+    _VERSE_LAYER_TYPES = ("sliding_attention",) * 5 + ("full_attention",)
+    _VERSE_LAYER_TYPES = _VERSE_LAYER_TYPES * 8
+
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         """Configure attention for heterogeneous head dimensions.
@@ -212,10 +215,11 @@ class Gemma4Config(VerifyAndUpdateConfig):
         model_config = vllm_config.model_config
         arch_config = model_config.model_arch_config
         layer_types = getattr(model_config.hf_text_config, "layer_types", None) or []
-        head_dims = {
-            layer_types[i]: arch_config[i].head_size
+        layer_head_dims = tuple(
+            (layer_types[i], arch_config[i].head_size)
             for i in range(min(arch_config.total_num_hidden_layers, len(layer_types)))
-        }
+        )
+        head_dims = dict(layer_head_dims)
 
         import vllm.envs as envs
         from vllm.platforms import current_platform
@@ -224,26 +228,55 @@ class Gemma4Config(VerifyAndUpdateConfig):
         if len(set(head_dims.values())) <= 1 and not envs.VLLM_VERSE_RUNTIME_STRICT:
             return
 
-        # NVFP4 KV cache on consumer Blackwell (CC 12.x): the FlashInfer
+        # The strict Verse profile on exact SM120 uses the FlashInfer
         # FA2 asymmetric paged kernel handles head_dim_qk=512 /
         # head_dim_vo=256 directly (the two-pass VO-split path), so route
         # the heterogeneous-head Gemma 4 config to FLASHINFER instead of
-        # the TRITON_ATTN fallback below. Gated on VLLM_NVFP4_KV_VOSPLIT
-        # (default-on for nvfp4) and only when the user did not pin a
-        # backend. Returns before the FA4/Triton selection.
+        # the TRITON_ATTN fallback below. This is opt-in, fail-closed, and
+        # returns before the generic FA4/Triton selection.
         cache_config = vllm_config.cache_config
         if envs.VLLM_VERSE_RUNTIME_STRICT:
             cache_dtype = cache_config.cache_dtype if cache_config is not None else ""
             requested_backend = vllm_config.attention_config.backend
-            supported_geometry = set(head_dims.values()) == {256, 512}
-            if not current_platform.is_device_capability_family(120):
+            expected_layer_head_dims = tuple(
+                (layer_type, 512 if layer_type == "full_attention" else 256)
+                for layer_type in Gemma4Config._VERSE_LAYER_TYPES
+            )
+            scheduler_config = vllm_config.scheduler_config
+            parallel_config = vllm_config.parallel_config
+            capability = current_platform.get_device_capability()
+            if capability is None or capability.to_int() != 120:
                 raise ValueError(
-                    "The strict Verse Gemma 4 runtime requires consumer Blackwell "
-                    "compute capability 12.x."
+                    "The strict Verse Gemma 4 runtime requires exact compute "
+                    "capability SM120."
                 )
-            if not cache_dtype.startswith("nvfp4"):
+            if model_config.quantization != "modelopt_fp4":
                 raise ValueError(
-                    "The strict Verse Gemma 4 runtime requires an NVFP4 KV cache."
+                    "The strict Verse Gemma 4 runtime requires ModelOpt NVFP4 "
+                    "weights (--quantization modelopt_fp4)."
+                )
+            if cache_dtype != "nvfp4":
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires exactly "
+                    "--kv-cache-dtype nvfp4."
+                )
+            if cache_config.kv_cache_dtype_skip_layers:
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime does not support KV-cache "
+                    "dtype skip layers."
+                )
+            if envs.VLLM_KV_CACHE_LAYOUT != "HND":
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires "
+                    "VLLM_KV_CACHE_LAYOUT=HND."
+                )
+            multimodal_config = model_config.multimodal_config
+            if (
+                multimodal_config is not None
+                and not multimodal_config.language_model_only
+            ):
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires text-only loading."
                 )
             if not envs.VLLM_NVFP4_KV_VOSPLIT:
                 raise ValueError(
@@ -254,35 +287,74 @@ class Gemma4Config(VerifyAndUpdateConfig):
                     "The strict Verse Gemma 4 runtime requires the FLASHINFER "
                     "attention backend."
                 )
-            if not supported_geometry:
+            if vllm_config.attention_config.backend_per_kind:
                 raise ValueError(
-                    "The strict Verse Gemma 4 runtime supports only the tested "
-                    "mixed 256/512 attention head geometry; got "
-                    f"{sorted(set(head_dims.values()))}."
+                    "The strict Verse Gemma 4 runtime does not support per-kind "
+                    "attention backend overrides."
+                )
+            if layer_head_dims != expected_layer_head_dims:
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires the exact tested "
+                    "48-layer pattern of five 256-wide sliding layers followed "
+                    "by one 512-wide full-attention layer."
+                )
+            if getattr(model_config, "disable_sliding_window", False):
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires sliding-window "
+                    "attention to remain enabled."
+                )
+            if getattr(model_config.hf_text_config, "sliding_window", None) != 1024:
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires the exact "
+                    "sliding_window=1024 attention mask."
+                )
+            if model_config.max_model_len != 6144:
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires max_model_len=6144."
+                )
+            if scheduler_config.max_num_seqs != 38:
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires max_num_seqs=38."
+                )
+            if scheduler_config.max_num_batched_tokens != 512:
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires "
+                    "max_num_batched_tokens=512."
+                )
+            if scheduler_config.async_scheduling:
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires synchronous "
+                    "B01 scheduling."
+                )
+            if vllm_config.speculative_config is not None:
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime does not support "
+                    "speculative decoding."
+                )
+            if (
+                parallel_config.tensor_parallel_size != 1
+                or parallel_config.pipeline_parallel_size != 1
+                or parallel_config.data_parallel_size != 1
+                or parallel_config.decode_context_parallel_size != 1
+            ):
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires one-GPU "
+                    "TP1/PP1/DP1/DCP1 execution."
+                )
+            if cache_config.kv_offloading_size is not None:
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime does not support KV offload."
+                )
+            if not model_config.enforce_eager:
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires --enforce-eager "
+                    "until the NVFP4 FA2 prefill wrapper is graph-safe."
                 )
             vllm_config.attention_config.backend = AttentionBackendEnum.FLASHINFER
             logger.info(
-                "Strict Verse Gemma 4 runtime validated consumer Blackwell, "
-                "NVFP4 KV, FLASHINFER, and mixed 256/512 head geometry."
-            )
-            return
-
-        if (
-            cache_config is not None
-            and cache_config.cache_dtype.startswith("nvfp4")
-            and envs.VLLM_NVFP4_KV_VOSPLIT
-            and vllm_config.attention_config.backend is None
-            and current_platform.is_device_capability_family(120)
-        ):
-            vllm_config.attention_config.backend = AttentionBackendEnum.FLASHINFER
-            logger.info(
-                "Gemma4 model has heterogeneous head dimensions %s with NVFP4 "
-                "KV cache on CC 12.x. Routing to FLASHINFER (FA2 VO-split "
-                "asymmetric head_dim_qk=%d/head_dim_vo=%d kernel) instead of "
-                "TRITON_ATTN.",
-                head_dims,
-                max(head_dims.values()),
-                min(head_dims.values()),
+                "Strict Verse Gemma 4 runtime validated exact SM120, "
+                "NVFP4 KV, FLASHINFER, eager execution, and the fixed Verse "
+                "6144/38/512 serving tuple."
             )
             return
 
