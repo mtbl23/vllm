@@ -556,6 +556,12 @@ RUN if [ "$RUN_WHEEL_CHECK" = "true" ] && \
 
 #################### WHEEL BUILD IMAGE ####################
 
+# Minimal BuildKit export target for containerless SM120 hosts. The runtime
+# bootstrap installs this exact wheel and the separately pinned FlashInfer
+# manifest instead of rebuilding vLLM on the serving machine.
+FROM scratch AS vllm-verse-sm120-wheel-export
+COPY --from=build /workspace/dist /dist
+
 #################### DEV IMAGE ####################
 FROM base AS dev
 
@@ -1080,7 +1086,6 @@ ENTRYPOINT ["vllm", "serve"]
 FROM vllm-openai AS vllm-openai-verse-sm120
 ARG CUDA_VERSION
 ARG VLLM_VERSION_OVERRIDE
-RUN rm -rf /vllm-workspace/benchmarks /vllm-workspace/examples
 COPY requirements/verse-sm120-flashinfer.lock \
     /opt/verse/requirements/verse-sm120-flashinfer.lock
 COPY tools/verse/verify_sm120_image.py \
@@ -1134,12 +1139,19 @@ COPY tests/v1/attention/test_gemma4_nvfp4_flashinfer_routing.py \
     /opt/verse-tests/tests/v1/attention/test_gemma4_nvfp4_flashinfer_routing.py
 COPY tests/v1/attention/test_nvfp4_flashinfer_vosplit.py \
     /opt/verse-tests/tests/v1/attention/test_nvfp4_flashinfer_vosplit.py
+# Hide inherited development-only trees from the runtime filesystem. This
+# whiteout intentionally narrows the visible appliance surface; it does not
+# claim to remove their bytes from lower OCI layers.
+RUN rm -rf /vllm-workspace/benchmarks /vllm-workspace/examples
 ENV VERSE_VLLM_WHEEL_VERSION=${VLLM_VERSION_OVERRIDE} \
     VLLM_VERSE_RUNTIME_STRICT=1 \
     VLLM_NVFP4_KV_VOSPLIT=1 \
     VLLM_KV_CACHE_LAYOUT=HND \
     VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0 \
     VLLM_USE_FLASHINFER_SAMPLER=0 \
+    VLLM_MAX_N_SEQUENCES=1 \
+    VLLM_MAX_COMPLETION_PROMPTS=1 \
+    VLLM_MAX_STOP_STRINGS=4 \
     FLASHINFER_WORKSPACE_BASE=/cache/flashinfer \
     CUDA_CACHE_PATH=/cache/cuda \
     TORCH_HOME=/cache/torch \

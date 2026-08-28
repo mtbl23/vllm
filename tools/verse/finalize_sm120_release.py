@@ -39,6 +39,23 @@ EXPECTED_SCENARIOS = {
 EXPECTED_PROFILE_IDENTITY = (
     f"sm120-gemma4-nvfp4-v{EXPECTED_PROFILE['VERSE_PROFILE_VERSION']}"
 )
+EXPECTED_SLOT_KV_BYTES = int(EXPECTED_PROFILE["VERSE_KV_CACHE_SLOT_BYTES"])
+EXPECTED_TOTAL_KV_BYTES = int(EXPECTED_PROFILE["VERSE_KV_CACHE_MEMORY_BYTES"])
+EXPECTED_BLOCK_KV_BYTES = int(EXPECTED_PROFILE["VERSE_KV_CACHE_BLOCK_BYTES"])
+EXPECTED_RESERVED_KV_BLOCKS = int(EXPECTED_PROFILE["VERSE_KV_CACHE_RESERVED_BLOCKS"])
+EXPECTED_SLOT_KV_BLOCKS = int(EXPECTED_PROFILE["VERSE_KV_CACHE_SLOT_BLOCKS"])
+EXPECTED_PREFILL_SHAPES = {
+    (37, 1): {
+        "minimum_retention": 0.30,
+        "maximum_wall_seconds": 1.50,
+        "maximum_integrated_deficit_tokens": 1_000.0,
+    },
+    (30, 8): {
+        "minimum_retention": 0.30,
+        "maximum_wall_seconds": 8.00,
+        "maximum_integrated_deficit_tokens": 6_000.0,
+    },
+}
 ROOT = Path(__file__).parents[2]
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 IMAGE_DIGEST_RE = re.compile(r".+@sha256:[0-9a-f]{64}")
@@ -88,6 +105,8 @@ QUALIFICATION_TOOL_RELATIVE_PATHS = (
     "tools/verse/run_sm120_acceptance.sh",
     "tools/verse/run_sm120_churn.py",
     "tools/verse/check_sm120_chat_contract.py",
+    "benchmarks/verse/sm120_prefill_interference.py",
+    "benchmarks/verse/SM120_PREFILL_SCHEDULER_RESULTS.md",
 )
 B01_REPORT_RELATIVE_PATHS = tuple(
     f"short/b01-{target}-run-{run}.json"
@@ -104,6 +123,8 @@ EXPECTED_ARTIFACT_RELATIVE_PATHS = (
     "short/chat-contract.json",
     *B01_REPORT_RELATIVE_PATHS,
     "short/b01-summary.json",
+    "short/prefill-37x1.json",
+    "short/prefill-30x8.json",
     "short/container-before.json",
     "short/container-after.json",
     "churn.json",
@@ -352,7 +373,12 @@ def validate_chat_contract(payload: dict[str, Any]) -> None:
     require(int(payload.get("ordinary_prompt_tokens", 0)) > 0, "missing prompt")
     validate_stream(payload.get("ordinary_stream"), 2)
     greedy = payload.get("greedy_decode_evidence")
-    require(isinstance(greedy, dict), "missing greedy decode evidence")
+    require(isinstance(greedy, dict), "missing finite greedy liveness evidence")
+    require(
+        greedy.get("scope") == "finite_liveness_only"
+        and greedy.get("deterministic_equality_required") is False,
+        "greedy evidence overclaims deterministic correctness",
+    )
 
     def validate_fingerprint(value: Any, expected_tokens: int, name: str) -> None:
         require(isinstance(value, dict), f"{name} is not an object")
@@ -372,14 +398,14 @@ def validate_chat_contract(payload: dict[str, Any]) -> None:
                 f"{name} contains a non-finite logprob",
             )
 
-    first_token_runs = greedy.get("greedy_first_token_runs")
+    first_token_runs = greedy.get("finite_first_token_runs")
     require(
         isinstance(first_token_runs, list) and len(first_token_runs) == 2,
         "greedy decode evidence does not contain two first-token runs",
     )
     for index, run in enumerate(first_token_runs):
         validate_fingerprint(run, 1, f"greedy first-token run {index}")
-    decode_runs = greedy.get("greedy_decode_runs")
+    decode_runs = greedy.get("finite_decode_runs")
     require(
         isinstance(decode_runs, list) and len(decode_runs) == 2,
         "greedy decode evidence does not contain two runs",
@@ -434,6 +460,45 @@ def validate_chat_contract(payload: dict[str, Any]) -> None:
     require(
         float(capacity.get("kv_cache_usage_at_simultaneous_decode", 0)) > 0,
         "capacity evidence has no positive KV occupancy at simultaneous decode",
+    )
+    require(
+        capacity.get("co_resident_max_kv_footprint_proven") is True,
+        "capacity evidence did not prove 38 independent requests at the "
+        "maximum per-request KV footprint",
+    )
+    configured_blocks = EXPECTED_TOTAL_KV_BYTES // EXPECTED_BLOCK_KV_BYTES
+    usable_blocks = configured_blocks - EXPECTED_RESERVED_KV_BLOCKS
+    required_blocks = EXPECTED_CONCURRENCY * EXPECTED_SLOT_KV_BLOCKS
+    require(
+        int(capacity.get("kv_cache_block_bytes", -1)) == EXPECTED_BLOCK_KV_BYTES
+        and int(capacity.get("configured_kv_cache_blocks", -1)) == configured_blocks
+        and int(capacity.get("reserved_kv_cache_blocks", -1))
+        == EXPECTED_RESERVED_KV_BLOCKS
+        and int(capacity.get("usable_kv_cache_blocks", -1)) == usable_blocks
+        and int(capacity.get("full_slot_kv_blocks_per_request", -1))
+        == EXPECTED_SLOT_KV_BLOCKS
+        and int(capacity.get("required_full_slot_kv_blocks", -1)) == required_blocks
+        and required_blocks <= usable_blocks
+        and EXPECTED_SLOT_KV_BLOCKS * EXPECTED_BLOCK_KV_BYTES == EXPECTED_SLOT_KV_BYTES
+        and int(capacity.get("full_slot_kv_bytes_per_request", -1))
+        == EXPECTED_SLOT_KV_BYTES
+        and int(capacity.get("configured_kv_cache_bytes", -1))
+        == EXPECTED_TOTAL_KV_BYTES,
+        "capacity evidence uses the wrong fixed KV byte accounting",
+    )
+    required_occupancy = float(capacity.get("required_full_slot_kv_occupancy", -1))
+    require(
+        math.isclose(
+            required_occupancy,
+            required_blocks / usable_blocks,
+            rel_tol=0,
+            abs_tol=1e-12,
+        )
+        and float(capacity.get("kv_cache_usage_at_full_slot_co_residency", -1))
+        >= required_occupancy,
+        "capacity evidence did not observe the required maximum-footprint KV "
+        "occupancy "
+        "while all streams were decoding",
     )
     stream_evidence = capacity.get("stream_completion_evidence")
     require(
@@ -557,6 +622,114 @@ def validate_b01_summary(payload: dict[str, Any], container: dict[str, Any]) -> 
         and float(payload.get("minimum_weighted_improvement", -1))
         == MINIMUM_WEIGHTED_IMPROVEMENT,
         "B01 weighted improvement is below threshold",
+    )
+
+
+def validate_prefill_interference(
+    payload: dict[str, Any],
+    container: dict[str, Any],
+    *,
+    decoders: int,
+    prefills: int,
+    release_nonce: str,
+    expected_gpu: dict[str, Any],
+) -> None:
+    require(payload.get("status") == "pass", "prefill interference run failed")
+    require(
+        payload.get("scope") == "current_profile_prefill_interference",
+        "prefill interference scope is invalid",
+    )
+    config = container.get("Config") or {}
+    labels = config.get("Labels") or {}
+    require(
+        payload.get("image_digest") == config.get("Image")
+        and payload.get("fork_commit") == labels.get("ai.vllm.build.commit")
+        and payload.get("model_revision") == EXPECTED_PROFILE["VERSE_MODEL_REVISION"],
+        "prefill interference identity differs from the candidate",
+    )
+    require(
+        parse_gpu_csv(payload.get("gpu_name"), "prefill interference") == expected_gpu,
+        "CUDA and prefill interference GPU identities differ",
+    )
+    require(
+        payload.get("release_nonce") == release_nonce,
+        "prefill interference release nonce differs",
+    )
+    require(
+        int(payload.get("max_num_batched_tokens", -1))
+        == int(EXPECTED_PROFILE["VERSE_MAX_NUM_BATCHED_TOKENS"]),
+        "prefill interference used the wrong scheduler token budget",
+    )
+    require(
+        int(payload.get("decoders", -1)) == decoders
+        and int(payload.get("prefills", -1)) == prefills,
+        "prefill interference used the wrong workload shape",
+    )
+    require(
+        int(payload.get("submitted_requests", -1)) == decoders + prefills
+        and int(payload.get("decode_prompt_tokens", -1)) == 4_500
+        and int(payload.get("decode_prompt_tokens_min", -1)) == 4_500
+        and int(payload.get("decode_prompt_tokens_max", -1)) == 4_500
+        and int(payload.get("decode_output_tokens", -1)) == 1_024
+        and int(payload.get("prefill_prompt_tokens_min", -1)) == 6_000
+        and int(payload.get("prefill_prompt_tokens_max", -1)) == 6_000
+        and int(payload.get("prefill_output_tokens", -1)) == 1
+        and math.isclose(
+            float(payload.get("baseline_seconds", -1)),
+            3.0,
+            rel_tol=0,
+            abs_tol=1e-12,
+        )
+        and math.isclose(
+            float(payload.get("metrics_interval_seconds", -1)),
+            0.05,
+            rel_tol=0,
+            abs_tol=1e-12,
+        ),
+        "prefill interference used a non-representative request shape",
+    )
+    require(
+        payload.get("decode_prefill_overlap_proven") is True
+        and payload.get("all_decoders_unfinished_before_prefill") is True
+        and payload.get("all_decoders_unfinished_after_prefill") is True,
+        "prefill interference did not prove decode and prefill overlap",
+    )
+    baseline_rate = float(payload.get("baseline_decode_tok_s", 0))
+    mixed_decode_rate = float(payload.get("decode_tok_s_during_prefill", 0))
+    retention = float(payload.get("decode_retention_ratio", 0))
+    wall_seconds = float(payload.get("prefill_wall_seconds", 0))
+    deficit = float(payload.get("integrated_decoder_deficit_tokens", -1))
+    expected_deficit = (baseline_rate - mixed_decode_rate) * wall_seconds
+    thresholds = EXPECTED_PREFILL_SHAPES[(decoders, prefills)]
+    require(
+        baseline_rate > 0
+        and mixed_decode_rate > 0
+        and 0 < retention <= 1
+        and math.isclose(
+            retention,
+            mixed_decode_rate / baseline_rate,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        )
+        and wall_seconds > 0
+        and math.isclose(
+            deficit,
+            expected_deficit,
+            rel_tol=1e-9,
+            abs_tol=1e-6,
+        ),
+        "prefill interference has inconsistent throughput accounting",
+    )
+    require(
+        retention >= thresholds["minimum_retention"]
+        and wall_seconds <= thresholds["maximum_wall_seconds"]
+        and deficit <= thresholds["maximum_integrated_deficit_tokens"],
+        "prefill interference exceeded the fixed release threshold",
+    )
+    require(
+        int(payload.get("preemptions_delta", -1)) == 0
+        and payload.get("server_idle_after") is True,
+        "prefill interference preempted or failed to drain",
     )
 
 
@@ -882,6 +1055,8 @@ def finalize(release_dir: Path) -> dict[str, Any]:
     )
     evidence = {
         "initial_contract": object_artifact("short/chat-contract.json"),
+        "prefill_37x1": object_artifact("short/prefill-37x1.json"),
+        "prefill_30x8": object_artifact("short/prefill-30x8.json"),
         "churn": object_artifact("churn.json"),
         "post_churn_contract": object_artifact("post-churn-chat-contract.json"),
         "cuda_identity": object_artifact("cuda-oracle.json"),
@@ -924,6 +1099,22 @@ def finalize(release_dir: Path) -> dict[str, Any]:
         evidence["cuda_identity"], artifacts["cuda-oracle.log"], containers[0]
     )
     validate_b01_summary(recomputed_b01, containers[0])
+    validate_prefill_interference(
+        evidence["prefill_37x1"],
+        containers[0],
+        decoders=37,
+        prefills=1,
+        release_nonce=recomputed_b01["release_nonce"],
+        expected_gpu=cuda_gpu,
+    )
+    validate_prefill_interference(
+        evidence["prefill_30x8"],
+        containers[0],
+        decoders=30,
+        prefills=8,
+        release_nonce=recomputed_b01["release_nonce"],
+        expected_gpu=cuda_gpu,
+    )
     require(
         parse_gpu_csv(recomputed_b01["identity"]["gpu_name"], "B01") == cuda_gpu,
         "CUDA and B01 GPU identities differ",
@@ -972,6 +1163,13 @@ def finalize(release_dir: Path) -> dict[str, Any]:
         "profile": EXPECTED_PROFILE_IDENTITY,
         "release_nonce": recomputed_b01["release_nonce"],
         "production_weights": recomputed_b01["production_weights"],
+        "prefill_interference": {
+            "scheduler_max_num_batched_tokens": int(
+                EXPECTED_PROFILE["VERSE_MAX_NUM_BATCHED_TOKENS"]
+            ),
+            "shapes": ["37x1", "30x8"],
+            "scope": "current_profile_prefill_interference",
+        },
         "container": {
             "id": identity[0],
             "image_id": identity[1],

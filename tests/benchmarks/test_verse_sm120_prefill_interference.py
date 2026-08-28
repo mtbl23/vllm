@@ -25,7 +25,7 @@ sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 
-def test_generated_rate_uses_exact_metric_window():
+def test_generated_rate_interpolates_exact_wall_window():
     sample = B01_MODULE.MetricSample
     samples = [
         sample(0.0, 100.0, 38.0, 0.0),
@@ -34,12 +34,12 @@ def test_generated_rate_uses_exact_metric_window():
         sample(3.0, 900.0, 38.0, 0.0),
     ]
 
-    assert MODULE.generated_rate(samples, 1.0, 3.0) == 350.0
+    assert MODULE.generated_rate(samples, 1.5, 2.5) == 350.0
 
 
-def test_generated_rate_rejects_single_sample_window():
+def test_generated_rate_rejects_unbracketed_window():
     sample = B01_MODULE.MetricSample
     samples = [sample(1.0, 200.0, 38.0, 0.0)]
 
-    with pytest.raises(RuntimeError, match="fewer than two"):
+    with pytest.raises(RuntimeError, match="do not bracket"):
         MODULE.generated_rate(samples, 0.0, 2.0)

@@ -106,6 +106,32 @@ done
 uv run --script "$ROOT/tools/verse/evaluate_sm120_acceptance.py" \
   "${REPORTS[@]}" >"$VERSE_VLLM_ACCEPTANCE_DIR/b01-summary.json"
 
+for SHAPE in 37x1 30x8; do
+  case "$SHAPE" in
+    37x1) DECODERS=37; PREFILLS=1 ;;
+    30x8) DECODERS=30; PREFILLS=8 ;;
+    *) echo "unexpected prefill interference shape" >&2; exit 1 ;;
+  esac
+  uv run --script "$ROOT/benchmarks/verse/sm120_prefill_interference.py" \
+    --endpoint "$ENDPOINT" \
+    --model "$VERSE_SERVED_MODEL_NAME" \
+    --api-key-file "$VERSE_VLLM_API_KEY_FILE" \
+    --decoders "$DECODERS" \
+    --prefills "$PREFILLS" \
+    --decode-prompt-tokens 4500 \
+    --decode-output-tokens 1024 \
+    --prefill-prompt-tokens 6000 \
+    --baseline-seconds 3 \
+    --metrics-interval 0.05 \
+    --image-digest "$VERSE_VLLM_IMAGE" \
+    --fork-commit "$VERSE_VLLM_EXPECTED_COMMIT" \
+    --model-revision "$VERSE_MODEL_REVISION" \
+    --gpu-name "$GPU_IDENTITY" \
+    --release-nonce "$RELEASE_NONCE" \
+    --max-num-batched-tokens "$VERSE_MAX_NUM_BATCHED_TOKENS" \
+    >"$VERSE_VLLM_ACCEPTANCE_DIR/prefill-${SHAPE}.json"
+done
+
 "$ROOT/tools/verse/check_sm120_server.sh" | tee "$POSTFLIGHT"
 docker inspect "$CONTAINER" >"$VERSE_VLLM_ACCEPTANCE_DIR/container-after.json"
 

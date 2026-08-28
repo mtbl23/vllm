@@ -145,7 +145,12 @@ def verify_model_directory(
     }
     if weights != expected_quant or activations != expected_quant:
         raise ValueError("model is not the validated W4A4 NVFP4 tuple")
-    if config.get("tie_word_embeddings") is not True:
+    text_config = config.get("text_config")
+    if (
+        config.get("tie_word_embeddings") is not True
+        or not isinstance(text_config, dict)
+        or text_config.get("tie_word_embeddings") is not True
+    ):
         raise ValueError("model must retain the validated tied BF16 output head")
     ignored_modules = quant.get("ignore")
     if not isinstance(ignored_modules, list) or "lm_head" not in ignored_modules:

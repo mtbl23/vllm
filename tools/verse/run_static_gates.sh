@@ -31,6 +31,7 @@ PYTHON_FILES=(
   tools/verse/finalize_sm120_release.py
   tools/verse/evaluate_sm120_acceptance.py
   tools/verse/check_sm120_chat_contract.py
+  tools/verse/download_sm120_model.py
   tools/verse/run_sm120_churn.py
   tools/verse/validate_sm120_container.py
   tools/verse/validate_sm120_profile.py
@@ -109,8 +110,13 @@ grep -Fq 'cloudflare_route.py' tools/verse/SM120_CUTOVER_RUNBOOK.md
 grep -Fq -- '--cap-drop ALL' tools/verse/run_sm120_server.sh
 grep -Fq -- '--user 2000:0' tools/verse/run_sm120_server.sh
 grep -Fq 'USER 2000:0' docker/Dockerfile
-grep -Fq 'rm -rf /vllm-workspace/benchmarks /vllm-workspace/examples' docker/Dockerfile
+grep -Fq 'rm -rf /vllm-workspace/benchmarks /vllm-workspace/examples' \
+  docker/Dockerfile
+grep -Fq 'whiteout intentionally narrows the visible appliance surface' \
+  docker/Dockerfile
 grep -Fq 'FLASHINFER_WORKSPACE_BASE=/cache/flashinfer' docker/Dockerfile
+grep -Fq 'VLLM_MAX_N_SEQUENCES=1' docker/Dockerfile
+grep -Fq 'VLLM_MAX_COMPLETION_PROMPTS=1' docker/Dockerfile
 if grep -Eq -- '--ipc host' \
   tools/verse/run_sm120_server.sh tools/verse/run_sm120_cuda_gates.sh; then
   echo "host IPC remains in the Verse appliance" >&2

@@ -28,10 +28,15 @@ wall time`. It measures the decoder work displaced over the entire prefill
 event, so a small instantaneous decode rate is not rewarded merely for ending
 the interference window quickly.
 
-## Decision
+## Provisional decision
 
-512 tokens is the measured knee. It has the smallest integrated decoder deficit
-for both one cold arrival and an eight-request prefill storm. Lower budgets
-preserve more instantaneous decode but prolong the storm enough to lose more
-decoder work. Higher budgets shorten prefill latency only slightly while
-displacing more decode.
+512 tokens is the qualified first-release budget. In this single exploratory
+sweep it produced the lowest observed integrated decoder deficit for both one
+cold arrival and an eight-request prefill storm. The 512-versus-768 margins are
+small enough that these measurements do not establish a statistically stable
+global optimum. Release evidence therefore proves only that the pinned
+512-token profile meets the fixed interference gates on the candidate image;
+it does not claim that 512 is universally optimal. Lower budgets preserved
+more instantaneous decode but prolonged the measured storm, while higher
+budgets shortened the measured prefill window and displaced more decode in
+this sweep.

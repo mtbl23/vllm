@@ -10,19 +10,23 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
-import os
+import re
 import secrets
 import statistics
 import threading
 import time
+from pathlib import Path
 
 from sm120_b01 import (
     MetricSample,
     build_prompt,
     completion,
     fetch_metrics,
+    load_api_key,
     poll_metrics,
+    request_json,
     validate_loopback_endpoint,
+    validate_release_nonce,
 )
 
 
@@ -35,14 +39,23 @@ def wait_for_running(endpoint: str, minimum: int, timeout: float) -> None:
     raise RuntimeError(f"server did not reach {minimum} running requests")
 
 
+def counter_at(samples: list[MetricSample], timestamp: float) -> float:
+    before = [sample for sample in samples if sample.timestamp <= timestamp]
+    after = [sample for sample in samples if sample.timestamp >= timestamp]
+    if not before or not after:
+        raise RuntimeError("metric samples do not bracket the requested timestamp")
+    left = before[-1]
+    right = after[0]
+    if left.timestamp == right.timestamp:
+        return left.generated
+    fraction = (timestamp - left.timestamp) / (right.timestamp - left.timestamp)
+    return left.generated + fraction * (right.generated - left.generated)
+
+
 def generated_rate(samples: list[MetricSample], start: float, end: float) -> float:
-    window = [sample for sample in samples if start <= sample.timestamp <= end]
-    if len(window) < 2:
-        raise RuntimeError("metric window contains fewer than two samples")
-    duration = window[-1].timestamp - window[0].timestamp
-    if duration <= 0:
+    if end <= start:
         raise RuntimeError("metric window duration is not positive")
-    return (window[-1].generated - window[0].generated) / duration
+    return (counter_at(samples, end) - counter_at(samples, start)) / (end - start)
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,6 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--endpoint", default="http://127.0.0.1:8000")
     parser.add_argument("--model", default="verse-free")
     parser.add_argument("--api-key-env", default="VLLM_API_KEY")
+    parser.add_argument("--api-key-file", type=Path)
     parser.add_argument("--decoders", type=int, required=True)
     parser.add_argument("--prefills", type=int, required=True)
     parser.add_argument("--decode-prompt-tokens", type=int, default=4500)
@@ -58,6 +72,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-seconds", type=float, default=3.0)
     parser.add_argument("--metrics-interval", type=float, default=0.05)
     parser.add_argument("--timeout", type=float, default=180.0)
+    parser.add_argument("--image-digest", required=True)
+    parser.add_argument("--fork-commit", required=True)
+    parser.add_argument("--model-revision", required=True)
+    parser.add_argument("--gpu-name", required=True)
+    parser.add_argument("--release-nonce", required=True)
+    parser.add_argument("--max-num-batched-tokens", type=int, required=True)
     return parser.parse_args()
 
 
@@ -68,9 +88,18 @@ def main() -> int:
     if args.decoders + args.prefills > 46:
         raise SystemExit("the interference harness caps total submitted requests at 46")
     endpoint = validate_loopback_endpoint(args.endpoint)
-    api_key = os.environ.get(args.api_key_env)
-    if not api_key:
-        raise SystemExit(f"{args.api_key_env} is required")
+    try:
+        api_key = load_api_key(args.api_key_file, args.api_key_env)
+        release_nonce = validate_release_nonce(args.release_nonce)
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    if not re.fullmatch(r".+@sha256:[0-9a-f]{64}", args.image_digest):
+        raise SystemExit("image digest must be immutable")
+    if not re.fullmatch(r"[0-9a-f]{40}", args.fork_commit):
+        raise SystemExit("fork commit must be a 40-character SHA")
+    if args.max_num_batched_tokens < 1:
+        raise SystemExit("max-num-batched-tokens must be positive")
+    server_identity = request_json("GET", f"{endpoint}/version", api_key)
     before = fetch_metrics(endpoint)
     if before.running or before.waiting:
         raise SystemExit("interference benchmark requires an idle server")
@@ -109,6 +138,7 @@ def main() -> int:
         prompts = [future.result() for future in futures]
 
     decode_prompts = [prompt for prompt, _ in prompts[: args.decoders]]
+    decode_counts = [count for _, count in prompts[: args.decoders]]
     prefill_prompts = [prompt for prompt, _ in prompts[args.decoders :]]
     prefill_counts = [count for _, count in prompts[args.decoders :]]
 
@@ -206,17 +236,34 @@ def main() -> int:
     after = fetch_metrics(endpoint)
     result = {
         "status": "pass",
+        "scope": "current_profile_prefill_interference",
+        "server_version": server_identity.get("version"),
+        "image_digest": args.image_digest,
+        "fork_commit": args.fork_commit,
+        "model_revision": args.model_revision,
+        "gpu_name": args.gpu_name,
+        "release_nonce": release_nonce,
+        "max_num_batched_tokens": args.max_num_batched_tokens,
         "decoders": args.decoders,
         "prefills": args.prefills,
         "submitted_requests": args.decoders + args.prefills,
         "decode_prompt_tokens": args.decode_prompt_tokens,
+        "decode_prompt_tokens_min": min(decode_counts),
+        "decode_prompt_tokens_max": max(decode_counts),
         "decode_output_tokens": args.decode_output_tokens,
+        "prefill_output_tokens": 1,
         "prefill_prompt_tokens_min": min(prefill_counts),
         "prefill_prompt_tokens_max": max(prefill_counts),
+        "baseline_seconds": args.baseline_seconds,
+        "metrics_interval_seconds": args.metrics_interval,
         "baseline_decode_tok_s": baseline_rate,
         "mixed_generation_tok_s": mixed_rate,
         "decode_tok_s_during_prefill": decode_rate_during_prefill,
         "decode_retention_ratio": decode_rate_during_prefill / baseline_rate,
+        "integrated_decoder_deficit_tokens": (
+            baseline_rate - decode_rate_during_prefill
+        )
+        * mixed_seconds,
         "aggregate_prefill_tok_s": sum(prefill_counts) / mixed_seconds,
         "prefill_wall_seconds": mixed_seconds,
         "prefill_latency_seconds": latencies,

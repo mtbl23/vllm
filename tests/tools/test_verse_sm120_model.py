@@ -41,6 +41,7 @@ def make_model(cache_dir: Path) -> tuple[Path, Path, dict]:
     config = {
         "architectures": ["Gemma4UnifiedForConditionalGeneration"],
         "tie_word_embeddings": True,
+        "text_config": {"tie_word_embeddings": True},
         "quantization_config": {
             "quant_algo": "NVFP4",
             "ignore": ["lm_head"],
@@ -217,6 +218,18 @@ def test_model_snapshot_rejects_quantized_output_head(tmp_path: Path):
     manifest_sha = sha256_file(model_dir / "final_w4a4_build_manifest.json")
 
     with pytest.raises(ValueError, match="exclude lm_head"):
+        verify_model_directory(model_dir, tmp_path, manifest_sha)
+
+
+def test_model_snapshot_rejects_untied_nested_text_head(tmp_path: Path):
+    _, model_dir, _ = make_model(tmp_path)
+    config_path = model_dir / "config.json"
+    config = json.loads(config_path.read_text())
+    config["text_config"]["tie_word_embeddings"] = False
+    config_path.write_text(json.dumps(config) + "\n")
+    manifest_sha = sha256_file(model_dir / "final_w4a4_build_manifest.json")
+
+    with pytest.raises(ValueError, match="tied BF16 output head"):
         verify_model_directory(model_dir, tmp_path, manifest_sha)
 
 

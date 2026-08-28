@@ -9,7 +9,7 @@ free-model runtime:
 - explicit HND physical KV layout
 - 6,144-token context
 - synchronous B01 scheduling with at most 38 active sequences
-- 512-token chunked-prefill batches, the measured decode/prefill interference knee
+- 512-token chunked-prefill batches, the provisionally qualified scheduler budget
 - FlashInfer's CUTLASS-4.7-compatible SM120 B12X backend for native W4A4 GEMM
 - prefix caching and the hybrid KV manager enabled
 - full-decode-only CUDA graphs at fixed capture sizes through 38 requests
@@ -28,11 +28,14 @@ cannot be enabled by a launch override.
 
 ## Build
 
-Builds must come from a clean committed tree. The image contains only SM120
-kernels and is labeled with the exact fork commit and the SHA-256 of the
-FlashInfer dependency manifest. The Python, cubin, and CUDA 13 JIT-cache wheels
-are all pinned to nightly-v0.6.18-20260819; Cutlass DSL is pinned to 4.7.0. The
-Linux/amd64 build and runtime base images are pinned by manifest digest.
+Builds must come from a clean committed tree. The derived image selects only
+SM120 kernels at runtime and is labeled with the exact fork commit and the
+SHA-256 of the FlashInfer dependency manifest. The inherited upstream OCI
+layers still contain the upstream source, examples, and benchmarks; deleting
+their visible paths in a later layer would not remove those bytes from image
+history. The Python, cubin, and CUDA 13 JIT-cache wheels are all pinned to
+nightly-v0.6.18-20260819; Cutlass DSL is pinned to 4.7.0. The Linux/amd64 build
+and runtime base images are pinned by manifest digest.
 
 ```bash
 VERSE_VLLM_IMAGE_REPOSITORY=registry.example/verse-vllm \

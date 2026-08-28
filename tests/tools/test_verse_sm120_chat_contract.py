@@ -265,16 +265,18 @@ def test_greedy_decode_evidence_records_repeated_valid_runs(monkeypatch):
 
     result = MODULE.greedy_decode_evidence("http://127.0.0.1:8000", "key", "model", [])
 
-    assert len(result["greedy_first_token_runs"]) == 2
-    assert result["greedy_first_token_runs"][0]["completion_tokens"] == 1
+    assert result["scope"] == "finite_liveness_only"
+    assert result["deterministic_equality_required"] is False
+    assert len(result["finite_first_token_runs"]) == 2
+    assert result["finite_first_token_runs"][0]["completion_tokens"] == 1
     assert (
-        result["greedy_first_token_runs"][0]["tokens_sha256"]
-        != result["greedy_first_token_runs"][1]["tokens_sha256"]
+        result["finite_first_token_runs"][0]["tokens_sha256"]
+        != result["finite_first_token_runs"][1]["tokens_sha256"]
     )
-    assert len(result["greedy_decode_runs"]) == 2
+    assert len(result["finite_decode_runs"]) == 2
     assert (
-        result["greedy_decode_runs"][0]["tokens_sha256"]
-        != result["greedy_decode_runs"][1]["tokens_sha256"]
+        result["finite_decode_runs"][0]["tokens_sha256"]
+        != result["finite_decode_runs"][1]["tokens_sha256"]
     )
 
 
@@ -341,6 +343,7 @@ def test_capacity_probe_overlaps_all_requests_and_observes_running(monkeypatch):
     assert result["observed_max_running"] == concurrency
     assert result["simultaneous_decoding_streams"] == concurrency
     assert result["kv_cache_usage_at_simultaneous_decode"] == 0.75
+    assert result["kv_cache_usage_at_full_slot_co_residency"] == 0.75
     assert result["verified_exact_completion_streams"] == concurrency
     assert (
         result["observed_completion_tokens_total"]

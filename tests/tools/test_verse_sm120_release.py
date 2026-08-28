@@ -107,7 +107,9 @@ def chat_contract() -> dict:
         "ordinary_prompt_tokens": 64,
         "ordinary_stream": stream(),
         "greedy_decode_evidence": {
-            "greedy_first_token_runs": [
+            "scope": "finite_liveness_only",
+            "deterministic_equality_required": False,
+            "finite_first_token_runs": [
                 {
                     "completion_tokens": 1,
                     "content_sha256": character * 64,
@@ -118,7 +120,7 @@ def chat_contract() -> dict:
                 }
                 for character in ("c", "d")
             ],
-            "greedy_decode_runs": [
+            "finite_decode_runs": [
                 {
                     "completion_tokens": 16,
                     "content_sha256": character * 64,
@@ -156,6 +158,19 @@ def chat_contract() -> dict:
             "simultaneous_decoding_streams": 38,
             "running_metric_samples": 10,
             "kv_cache_usage_at_simultaneous_decode": 0.9,
+            "kv_cache_usage_at_full_slot_co_residency": 0.9,
+            "observed_max_kv_cache_usage": 0.9,
+            "kv_cache_usage_after_drain": 0.9,
+            "kv_cache_block_bytes": 294912,
+            "configured_kv_cache_blocks": 19342,
+            "reserved_kv_cache_blocks": 1,
+            "usable_kv_cache_blocks": 19341,
+            "full_slot_kv_blocks_per_request": 421,
+            "required_full_slot_kv_blocks": 15998,
+            "full_slot_kv_bytes_per_request": 124157952,
+            "configured_kv_cache_bytes": 5704253440,
+            "required_full_slot_kv_occupancy": (15998 / 19341),
+            "co_resident_max_kv_footprint_proven": True,
             "preemptions_before": 0,
             "preemptions_after": 0,
             "scheduler_running_before": 0,
@@ -213,6 +228,42 @@ def b01_reports() -> list[dict]:
 
 def b01_summary(reports: list[dict] | None = None) -> dict:
     return MODULE.evaluate_b01(reports if reports is not None else b01_reports())
+
+
+def prefill_interference(decoders: int, prefills: int) -> dict:
+    return {
+        "status": "pass",
+        "scope": "current_profile_prefill_interference",
+        "server_version": "0.28.0",
+        "image_digest": IMAGE_DIGEST,
+        "fork_commit": FORK_COMMIT,
+        "model_revision": MODEL_REVISION,
+        "gpu_name": GPU_IDENTITY,
+        "release_nonce": RELEASE_NONCE,
+        "max_num_batched_tokens": 512,
+        "decoders": decoders,
+        "prefills": prefills,
+        "submitted_requests": decoders + prefills,
+        "decode_prompt_tokens": 4500,
+        "decode_prompt_tokens_min": 4500,
+        "decode_prompt_tokens_max": 4500,
+        "decode_output_tokens": 1024,
+        "prefill_prompt_tokens_min": 6000,
+        "prefill_prompt_tokens_max": 6000,
+        "prefill_output_tokens": 1,
+        "baseline_seconds": 3.0,
+        "metrics_interval_seconds": 0.05,
+        "decode_prefill_overlap_proven": True,
+        "all_decoders_unfinished_before_prefill": True,
+        "all_decoders_unfinished_after_prefill": True,
+        "baseline_decode_tok_s": 1200.0,
+        "decode_tok_s_during_prefill": 600.0,
+        "decode_retention_ratio": 0.5,
+        "prefill_wall_seconds": 1.0 if prefills == 1 else 6.0,
+        "integrated_decoder_deficit_tokens": (600.0 if prefills == 1 else 3600.0),
+        "preemptions_delta": 0,
+        "server_idle_after": True,
+    }
 
 
 def cuda_image_verification() -> dict:
@@ -378,6 +429,8 @@ def release_tree(tmp_path: Path) -> Path:
     for relative, report in zip(MODULE.B01_REPORT_RELATIVE_PATHS, reports, strict=True):
         write_json(release / relative, report)
     write_json(release / "short/b01-summary.json", b01_summary(reports))
+    write_json(release / "short/prefill-37x1.json", prefill_interference(37, 1))
+    write_json(release / "short/prefill-30x8.json", prefill_interference(30, 8))
     write_json(release / "short/chat-contract.json", chat_contract())
     write_json(release / "churn.json", churn())
     write_json(release / "post-churn-chat-contract.json", chat_contract())
@@ -407,7 +460,7 @@ def test_release_finalizer_accepts_one_unchanged_container(tmp_path: Path):
 
     assert result["status"] == "pass"
     assert result["scope"] == "pre_cutover_candidate_qualification"
-    assert result["profile"] == "sm120-gemma4-nvfp4-v3"
+    assert result["profile"] == "sm120-gemma4-nvfp4-v4"
     assert result["release_nonce"] == RELEASE_NONCE
     assert result["container"]["id"] == CONTAINER_ID
     assert result["cuda_oracle"]["gpu"]["compute_capability"] == [12, 0]
@@ -495,6 +548,75 @@ def test_release_finalizer_rejects_incomplete_stream_evidence(tmp_path: Path):
     write_json(release / "short/chat-contract.json", payload)
 
     with pytest.raises(ValueError, match="per-stream completion evidence"):
+        MODULE.finalize(release)
+
+
+def test_release_finalizer_rejects_capacity_byte_accounting_drift(tmp_path: Path):
+    release = release_tree(tmp_path)
+    payload = chat_contract()
+    payload["exact_boundary_capacity"]["full_slot_kv_bytes_per_request"] += 16
+    write_json(release / "short/chat-contract.json", payload)
+
+    with pytest.raises(ValueError, match="fixed KV byte accounting"):
+        MODULE.finalize(release)
+
+
+def test_release_finalizer_rejects_capacity_below_profile_occupancy(tmp_path: Path):
+    release = release_tree(tmp_path)
+    payload = chat_contract()
+    payload["exact_boundary_capacity"]["kv_cache_usage_at_full_slot_co_residency"] = 0.1
+    write_json(release / "short/chat-contract.json", payload)
+
+    with pytest.raises(ValueError, match="required maximum-footprint KV occupancy"):
+        MODULE.finalize(release)
+
+
+def test_release_finalizer_rejects_prefill_gpu_identity_drift(tmp_path: Path):
+    release = release_tree(tmp_path)
+    path = release / "short/prefill-37x1.json"
+    payload = json.loads(path.read_text())
+    payload["gpu_name"] = GPU_IDENTITY.replace(
+        GPU_UUID, "GPU-ffffffff-ffff-ffff-ffff-ffffffffffff"
+    )
+    write_json(path, payload)
+
+    with pytest.raises(ValueError, match="prefill interference GPU identities"):
+        MODULE.finalize(release)
+
+
+def test_release_finalizer_rejects_prefill_scheduler_budget_drift(tmp_path: Path):
+    release = release_tree(tmp_path)
+    path = release / "short/prefill-30x8.json"
+    payload = json.loads(path.read_text())
+    payload["max_num_batched_tokens"] = 768
+    write_json(path, payload)
+
+    with pytest.raises(ValueError, match="wrong scheduler token budget"):
+        MODULE.finalize(release)
+
+
+def test_release_finalizer_rejects_nonrepresentative_prefill_shape(tmp_path: Path):
+    release = release_tree(tmp_path)
+    path = release / "short/prefill-37x1.json"
+    payload = json.loads(path.read_text())
+    payload["prefill_prompt_tokens_min"] = 1_000
+    payload["prefill_prompt_tokens_max"] = 1_000
+    write_json(path, payload)
+
+    with pytest.raises(ValueError, match="non-representative request shape"):
+        MODULE.finalize(release)
+
+
+def test_release_finalizer_rejects_poor_prefill_interference(tmp_path: Path):
+    release = release_tree(tmp_path)
+    path = release / "short/prefill-30x8.json"
+    payload = json.loads(path.read_text())
+    payload["decode_tok_s_during_prefill"] = 240.0
+    payload["decode_retention_ratio"] = 0.2
+    payload["integrated_decoder_deficit_tokens"] = 5_760.0
+    write_json(path, payload)
+
+    with pytest.raises(ValueError, match="fixed release threshold"):
         MODULE.finalize(release)
 
 
