@@ -36,6 +36,9 @@ from verify_sm120_image import (
 EXPECTED_SCENARIOS = {
     str(target): expectation for target, expectation in B01_EXPECTED_SCENARIOS.items()
 }
+EXPECTED_PROFILE_IDENTITY = (
+    f"sm120-gemma4-nvfp4-v{EXPECTED_PROFILE['VERSE_PROFILE_VERSION']}"
+)
 ROOT = Path(__file__).parents[2]
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 IMAGE_DIGEST_RE = re.compile(r".+@sha256:[0-9a-f]{64}")
@@ -46,12 +49,15 @@ DOCKER_HOST_ID_RE = re.compile(r"[A-Za-z0-9:._-]{8,256}")
 CUDA_MARKERS = (
     "VERSE_ROUTING_GATES_PASSED",
     "VERSE_GPU_ORACLE_PASSED",
-    "SM120 image and native NVFP4 FA2 correctness gates passed",
+    "VERSE_B12X_ORACLE_PASSED",
+    "SM120 image and native NVFP4 FA2/B12X correctness gates passed",
 )
 CUDA_TEST_ARTIFACT_RELATIVE_PATHS = (
     "tests/v1/attention/test_gemma4_nvfp4_flashinfer_routing.py",
     "tests/v1/attention/test_nvfp4_flashinfer_vosplit.py",
     "tests/kernels/attention/test_flashinfer.py",
+    "tests/kernels/quantization/nvfp4_utils.py",
+    "tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py",
 )
 CUDA_ROUTING_TEST_PREFIXES = (
     "tests/v1/attention/test_gemma4_nvfp4_flashinfer_routing.py::",
@@ -63,7 +69,19 @@ CUDA_GPU_TEST_PREFIXES = (
     "tests/kernels/attention/test_flashinfer.py::"
     "test_flashinfer_fa2_nvfp4_gemma4_sliding_hnd_matches_reference",
 )
-EXPECTED_CUDA_TEST_COUNTS = {"routing": 47, "gpu_oracle": 6}
+CUDA_B12X_TEST_PREFIX = (
+    "tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py::"
+    "test_flashinfer_b12x_nvfp4_linear_matches_reference"
+)
+CUDA_B12X_TEST_NODE_IDS = tuple(
+    f"{CUDA_B12X_TEST_PREFIX}[{case}]"
+    for case in ("decode", "max-seqs", "max-batched-tokens")
+)
+EXPECTED_CUDA_TEST_COUNTS = {
+    "routing": 47,
+    "gpu_oracle": 6,
+    "b12x_oracle": len(CUDA_B12X_TEST_NODE_IDS),
+}
 QUALIFICATION_TOOL_RELATIVE_PATHS = (
     "tools/verse/run_sm120_release_gates.sh",
     "tools/verse/run_sm120_cuda_gates.sh",
@@ -606,7 +624,9 @@ def validate_cuda_identity(
         len({test.get("node_id") for test in tests}) == len(tests),
         "CUDA test inventory contains duplicate node IDs",
     )
-    suite_nodes: dict[str, list[str]] = {"routing": [], "gpu_oracle": []}
+    suite_nodes: dict[str, list[str]] = {
+        suite: [] for suite in EXPECTED_CUDA_TEST_COUNTS
+    }
     for test in tests:
         require(
             isinstance(test, dict)
@@ -648,6 +668,10 @@ def validate_cuda_identity(
         )
         == 2,
         "CUDA GPU parameterized node inventory is incomplete",
+    )
+    require(
+        set(suite_nodes["b12x_oracle"]) == set(CUDA_B12X_TEST_NODE_IDS),
+        "CUDA B12X parameterized node inventory is incomplete",
     )
 
     log_artifact_hashes: dict[str, str] = {}
@@ -824,9 +848,14 @@ def finalize(release_dir: Path) -> dict[str, Any]:
     )
     for container in containers:
         state = container.get("State") or {}
+        labels = (container.get("Config") or {}).get("Labels") or {}
         require(
             CONTAINER_ID_RE.fullmatch(str(container.get("Id", ""))) is not None,
             "candidate container ID is not exact",
+        )
+        require(
+            labels.get("ai.verse.runtime.profile") == EXPECTED_PROFILE_IDENTITY,
+            "candidate container has the wrong runtime profile",
         )
         require(state.get("Running") is True, "container is not running")
         require(state.get("OOMKilled") is False, "container was OOM-killed")
@@ -866,6 +895,11 @@ def finalize(release_dir: Path) -> dict[str, Any]:
             f"commit={expected_commit}" in lines,
             f"{relative} has the wrong source identity",
         )
+        profile_lines = [line for line in lines if line.startswith("profile=")]
+        require(
+            profile_lines == [f"profile={EXPECTED_PROFILE_IDENTITY}"],
+            f"{relative} has the wrong runtime profile",
+        )
 
     hashes = {relative: sha256_bytes(data) for relative, data in artifacts.items()}
     qualification_tool_hashes = {
@@ -876,6 +910,7 @@ def finalize(release_dir: Path) -> dict[str, Any]:
     return {
         "status": "pass",
         "scope": "pre_cutover_candidate_qualification",
+        "profile": EXPECTED_PROFILE_IDENTITY,
         "release_nonce": recomputed_b01["release_nonce"],
         "production_weights": recomputed_b01["production_weights"],
         "container": {

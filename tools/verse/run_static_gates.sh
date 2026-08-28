@@ -10,6 +10,7 @@ PYTHON_FILES=(
   tests/benchmarks/test_verse_sm120_b01.py
   tests/kernels/attention/test_flashinfer.py
   tests/kernels/quantization/nvfp4_utils.py
+  tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py
   tests/tools/test_verse_sm120_container.py
   tests/tools/test_verse_sm120_cutover.py
   tests/tools/test_verse_sm120_acceptance.py

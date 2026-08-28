@@ -1127,6 +1127,8 @@ COPY tests/kernels/attention/test_flashinfer.py \
     /opt/verse-tests/tests/kernels/attention/test_flashinfer.py
 COPY tests/kernels/quantization/nvfp4_utils.py \
     /opt/verse-tests/tests/kernels/quantization/nvfp4_utils.py
+COPY tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py \
+    /opt/verse-tests/tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py
 COPY tests/v1/attention/test_gemma4_nvfp4_flashinfer_routing.py \
     /opt/verse-tests/tests/v1/attention/test_gemma4_nvfp4_flashinfer_routing.py
 COPY tests/v1/attention/test_nvfp4_flashinfer_vosplit.py \

@@ -179,21 +179,23 @@ def test_single_metric_requires_one_series(monkeypatch):
             return False
 
         def read(self):
-            return io.BytesIO(b"vllm:num_preemptions 7\n").read()
+            return io.BytesIO(b"vllm:num_preemptions_total 7\n").read()
 
     class Opener:
         def open(self, request, timeout):
             return Response()
 
     monkeypatch.setattr(MODULE, "OPENER", Opener())
-    assert MODULE.single_metric("http://127.0.0.1:8000", "vllm:num_preemptions") == 7
+    assert (
+        MODULE.single_metric("http://127.0.0.1:8000", "vllm:num_preemptions_total") == 7
+    )
 
 
 def test_capacity_metrics_are_parsed_as_one_atomic_snapshot():
     metrics = """
 vllm:num_requests_running{engine="0"} 38
 vllm:num_requests_waiting{engine="0"} 0
-vllm:num_preemptions{engine="0"} 4
+vllm:num_preemptions_total{engine="0"} 4
 vllm:kv_cache_usage_perc{engine="0"} 0.8125
 """
 
@@ -209,7 +211,7 @@ def test_capacity_metrics_fail_closed_when_kv_occupancy_is_missing():
     metrics = """
 vllm:num_requests_running{engine="0"} 38
 vllm:num_requests_waiting{engine="0"} 0
-vllm:num_preemptions{engine="0"} 0
+vllm:num_preemptions_total{engine="0"} 0
 """
 
     with pytest.raises(ValueError, match="exactly one kv_usage metric series"):

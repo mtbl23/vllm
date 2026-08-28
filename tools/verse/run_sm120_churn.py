@@ -30,9 +30,9 @@ OPENER = urllib.request.build_opener(
 METRICS = {
     "running": "vllm:num_requests_running",
     "waiting": "vllm:num_requests_waiting",
-    "preemptions": "vllm:num_preemptions",
-    "prefix_queries": "vllm:prefix_cache_queries",
-    "prefix_hits": "vllm:prefix_cache_hits",
+    "preemptions": "vllm:num_preemptions_total",
+    "prefix_queries": "vllm:prefix_cache_queries_total",
+    "prefix_hits": "vllm:prefix_cache_hits_total",
     "kv_usage": "vllm:kv_cache_usage_perc",
     "generation_tokens": "vllm:generation_tokens_total",
 }

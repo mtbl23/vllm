@@ -72,6 +72,7 @@ def container(started_at: str = "2026-08-28T00:00:00Z") -> list[dict]:
                 "Labels": {
                     "ai.vllm.build.commit": FORK_COMMIT,
                     "ai.verse.gpu.uuid": GPU_UUID,
+                    "ai.verse.runtime.profile": MODULE.EXPECTED_PROFILE_IDENTITY,
                 },
             },
             "HostConfig": {
@@ -238,7 +239,15 @@ def cuda_tests() -> list[dict]:
         }
         for index in range(2)
     )
-    return [*routing, *gpu]
+    b12x = [
+        {
+            "node_id": node_id,
+            "result": "passed",
+            "suite": "b12x_oracle",
+        }
+        for node_id in MODULE.CUDA_B12X_TEST_NODE_IDS
+    ]
+    return [*routing, *gpu, *b12x]
 
 
 def cuda_artifact_hashes() -> dict[str, str]:
@@ -248,14 +257,15 @@ def cuda_artifact_hashes() -> dict[str, str]:
     }
 
 
-def cuda_log() -> str:
+def cuda_log(tests: list[dict] | None = None) -> str:
+    test_inventory = cuda_tests() if tests is None else tests
     lines = [
         json.dumps(cuda_image_verification(), indent=2, sort_keys=True),
         f"VERSE_CUDA_GPU_IDENTITY={GPU_IDENTITY}",
     ]
     lines.extend(
         f"VERSE_CUDA_TEST_RESULT={test['result']} {test['suite']} {test['node_id']}"
-        for test in cuda_tests()
+        for test in test_inventory
     )
     lines.extend(
         f"VERSE_CUDA_TEST_ARTIFACT_SHA256={digest}  {relative}"
@@ -265,7 +275,7 @@ def cuda_log() -> str:
     return "\n".join(lines) + "\n"
 
 
-def cuda_identity(log: str) -> dict:
+def cuda_identity(log: str, tests: list[dict] | None = None) -> dict:
     return {
         "schema_version": 3,
         "status": "pass",
@@ -274,7 +284,7 @@ def cuda_identity(log: str) -> dict:
         "gpu_selector": GPU_UUID,
         "gpu": GPU,
         "host": HOST,
-        "tests": cuda_tests(),
+        "tests": cuda_tests() if tests is None else tests,
         "test_artifacts_sha256": cuda_artifact_hashes(),
         "test_log_sha256": hashlib.sha256(log.encode()).hexdigest(),
         "oracle_markers": list(MODULE.CUDA_MARKERS),
@@ -288,7 +298,7 @@ def server_record() -> str:
         "container=verse-vllm-sm120\n"
         "endpoint=http://127.0.0.1:8000\n"
         f"commit={FORK_COMMIT}\n"
-        "profile=sm120-gemma4-nvfp4-v2\n"
+        f"profile={MODULE.EXPECTED_PROFILE_IDENTITY}\n"
     )
 
 
@@ -365,10 +375,14 @@ def test_release_finalizer_accepts_one_unchanged_container(tmp_path: Path):
 
     assert result["status"] == "pass"
     assert result["scope"] == "pre_cutover_candidate_qualification"
+    assert result["profile"] == "sm120-gemma4-nvfp4-v2"
     assert result["release_nonce"] == RELEASE_NONCE
     assert result["container"]["id"] == CONTAINER_ID
     assert result["cuda_oracle"]["gpu"]["compute_capability"] == [12, 0]
     assert result["cuda_oracle"]["gpu"]["uuid"] == GPU_UUID
+    assert result["cuda_oracle"]["test_count"] == sum(
+        MODULE.EXPECTED_CUDA_TEST_COUNTS.values()
+    )
     assert result["disposable_host"]["identity_sha256"] == HOST_IDENTITY_SHA256
     assert set(result["artifacts_sha256"]) == set(
         MODULE.EXPECTED_ARTIFACT_RELATIVE_PATHS
@@ -386,6 +400,34 @@ def test_release_finalizer_rejects_restart(tmp_path: Path):
         assert "identity changed" in str(exc)
     else:
         raise AssertionError("a restarted container was accepted")
+
+
+def test_release_finalizer_rejects_container_profile_drift(tmp_path: Path):
+    release = release_tree(tmp_path)
+    path = release / "container-after-churn.json"
+    payload = json.loads(path.read_text())
+    payload[0]["Config"]["Labels"]["ai.verse.runtime.profile"] = "sm120-gemma4-nvfp4-v1"
+    write_json(path, payload)
+
+    try:
+        MODULE.finalize(release)
+    except ValueError as exc:
+        assert "wrong runtime profile" in str(exc)
+    else:
+        raise AssertionError("container evidence for another profile was accepted")
+
+
+def test_release_finalizer_rejects_server_profile_drift(tmp_path: Path):
+    release = release_tree(tmp_path)
+    path = release / "short/postflight.txt"
+    write_text(path, server_record() + "profile=sm120-gemma4-nvfp4-v1\n")
+
+    try:
+        MODULE.finalize(release)
+    except ValueError as exc:
+        assert "wrong runtime profile" in str(exc)
+    else:
+        raise AssertionError("ambiguous server profile evidence was accepted")
 
 
 def test_release_finalizer_rejects_placeholder_chat_evidence(tmp_path: Path):
@@ -504,6 +546,22 @@ def test_release_finalizer_rejects_cuda_log_tampering(tmp_path: Path):
         raise AssertionError("tampered CUDA output was accepted")
 
 
+def test_release_finalizer_rejects_missing_b12x_oracle_node(tmp_path: Path):
+    release = release_tree(tmp_path)
+    tests = cuda_tests()[:-1]
+    log = cuda_log(tests)
+    write_text(release / "cuda-oracle.log", log)
+    write_json(release / "cuda-oracle.json", cuda_identity(log, tests))
+
+    try:
+        MODULE.finalize(release)
+    except ValueError as exc:
+        assert "B12X" in str(exc) or "b12x_oracle" in str(exc)
+        assert "incomplete" in str(exc)
+    else:
+        raise AssertionError("release evidence without every B12X node was accepted")
+
+
 def test_release_finalizer_rejects_cuda_image_identity_drift(tmp_path: Path):
     release = release_tree(tmp_path)
     path = release / "cuda-oracle.json"
@@ -590,6 +648,10 @@ def test_release_wrappers_anchor_exact_container_and_gpu_ids():
         MODULE.ROOT / "tools/verse/run_sm120_release_gates.sh"
     ).read_text()
     cuda_runner = (MODULE.ROOT / "tools/verse/run_sm120_cuda_gates.sh").read_text()
+    dockerfile = (MODULE.ROOT / "docker/Dockerfile").read_text()
+    b12x_oracle = (
+        MODULE.ROOT / "tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py"
+    ).read_text()
 
     assert "require_env VERSE_VLLM_CONTAINER_ID" in release_runner
     assert "${VERSE_VLLM_CONTAINER:-" not in release_runner
@@ -597,3 +659,14 @@ def test_release_wrappers_anchor_exact_container_and_gpu_ids():
     assert 'docker exec "$VERSE_VLLM_CONTAINER_ID"' in release_runner
     assert "require_env VERSE_VLLM_GPU_UUID" in cuda_runner
     assert '--gpus "device=$VERSE_VLLM_GPU_UUID"' in cuda_runner
+    assert "((B12X_COUNT == 3))" in cuda_runner
+    assert "VERSE_B12X_ORACLE_PASSED" in cuda_runner
+    assert "tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py" in (cuda_runner)
+    assert (
+        "COPY tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py" in dockerfile
+    )
+    assert "pytest.skip" not in b12x_oracle
+    assert "torch.cuda.get_device_capability(0) == (12, 0)" in b12x_oracle
+    assert 'importlib.util.find_spec("b12x") is None' in b12x_oracle
+    assert "FlashInferB12xNvFp4LinearKernel" in b12x_oracle
+    assert 'backend="b12x"' in b12x_oracle

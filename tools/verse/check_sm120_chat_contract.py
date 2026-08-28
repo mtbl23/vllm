@@ -36,7 +36,7 @@ OPENER = build_isolated_opener()
 CAPACITY_METRICS = {
     "running": "vllm:num_requests_running",
     "waiting": "vllm:num_requests_waiting",
-    "preemptions": "vllm:num_preemptions",
+    "preemptions": "vllm:num_preemptions_total",
     "kv_usage": "vllm:kv_cache_usage_perc",
 }
 

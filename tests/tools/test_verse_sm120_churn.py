@@ -22,9 +22,9 @@ def test_parse_metrics_accepts_exact_single_engine_series():
     text = """
 vllm:num_requests_running{engine="0"} 38
 vllm:num_requests_waiting{engine="0"} 2
-vllm:num_preemptions{engine="0"} 0
-vllm:prefix_cache_queries{engine="0"} 1000
-vllm:prefix_cache_hits{engine="0"} 900
+vllm:num_preemptions_total{engine="0"} 0
+vllm:prefix_cache_queries_total{engine="0"} 1000
+vllm:prefix_cache_hits_total{engine="0"} 900
 vllm:kv_cache_usage_perc{engine="0"} 0.7
 vllm:generation_tokens_total{engine="0"} 12345
 """
@@ -58,9 +58,9 @@ def test_parse_metrics_fails_closed_when_decode_progress_is_unobservable():
     text = """
 vllm:num_requests_running{engine="0"} 38
 vllm:num_requests_waiting{engine="0"} 0
-vllm:num_preemptions{engine="0"} 0
-vllm:prefix_cache_queries{engine="0"} 1000
-vllm:prefix_cache_hits{engine="0"} 900
+vllm:num_preemptions_total{engine="0"} 0
+vllm:prefix_cache_queries_total{engine="0"} 1000
+vllm:prefix_cache_hits_total{engine="0"} 900
 vllm:kv_cache_usage_perc{engine="0"} 0.7
 """
 
