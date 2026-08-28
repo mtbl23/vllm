@@ -1092,6 +1092,9 @@ COPY tools/verse/sm120_profile.env \
     /opt/verse-tools/sm120_profile.env
 COPY docker/entrypoints/verse-sm120-entrypoint.sh \
     /usr/local/bin/verse-sm120-entrypoint.sh
+RUN printf '%s\n' 'nvidia-nccl-cu13==2.29.7' \
+    > /etc/uv-overrides-verse-sm120.txt
+ENV UV_OVERRIDE=/etc/uv-overrides-verse-sm120.txt
 RUN --mount=type=cache,target=/opt/uv/cache \
     test "${CUDA_VERSION}" = "13.0.3" \
     && printf '%s\n' "${VLLM_VERSION_OVERRIDE}" | \

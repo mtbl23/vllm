@@ -120,6 +120,7 @@ def base_container(tmp_path: Path) -> tuple[dict, list[str]]:
             "Env": [
                 "VLLM_API_KEY_FILE=/run/secrets/vllm_api_key",
                 f"VERSE_VLLM_WHEEL_VERSION=0.28.0+verse.{COMMIT[:12]}",
+                "UV_OVERRIDE=/etc/uv-overrides-verse-sm120.txt",
                 "VLLM_VERSE_RUNTIME_STRICT=1",
                 "VLLM_NVFP4_KV_VOSPLIT=1",
                 "VLLM_KV_CACHE_LAYOUT=HND",

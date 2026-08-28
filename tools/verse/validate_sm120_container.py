@@ -282,6 +282,7 @@ def validate_container(container: dict[str, Any], args: argparse.Namespace) -> d
     for required in (
         "VLLM_API_KEY_FILE=/run/secrets/vllm_api_key",
         f"VERSE_VLLM_WHEEL_VERSION={expected_wheel_version}",
+        "UV_OVERRIDE=/etc/uv-overrides-verse-sm120.txt",
         "VLLM_VERSE_RUNTIME_STRICT=1",
         "VLLM_NVFP4_KV_VOSPLIT=1",
         "VLLM_KV_CACHE_LAYOUT=HND",
