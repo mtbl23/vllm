@@ -18,7 +18,7 @@ import pytest
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-ALL_KNOBS = ("VLLM_NVFP4_KV_VOSPLIT",)
+ALL_KNOBS = ("VLLM_NVFP4_KV_VOSPLIT", "VLLM_VERSE_RUNTIME_STRICT")
 
 CC12_0 = DeviceCapability(12, 0)
 CC12_1 = DeviceCapability(12, 1)
@@ -150,3 +150,56 @@ def test_bf16_kv_keeps_triton_fallback(fake_cc):
     fake_cc(CC12_0)
     cfg = _mock_vllm_config(cache_dtype="auto")
     assert _gemma4_route(cfg) == AttentionBackendEnum.TRITON_ATTN
+
+
+def test_strict_verse_runtime_routes_supported_tuple(fake_cc, monkeypatch):
+    monkeypatch.setenv("VLLM_VERSE_RUNTIME_STRICT", "1")
+    fake_cc(CC12_0)
+    assert _gemma4_route(_mock_vllm_config()) == AttentionBackendEnum.FLASHINFER
+
+
+@pytest.mark.parametrize(
+    "capability,cache_dtype,backend,head_dim,global_head_dim,error",
+    [
+        (CC9_0, "nvfp4", None, 256, 512, "compute capability 12.x"),
+        (CC12_0, "auto", None, 256, 512, "NVFP4 KV cache"),
+        (
+            CC12_0,
+            "nvfp4",
+            AttentionBackendEnum.TRITON_ATTN,
+            256,
+            512,
+            "FLASHINFER attention backend",
+        ),
+        (CC12_0, "nvfp4", None, 128, 512, "mixed 256/512"),
+        (CC12_0, "nvfp4", None, 256, 256, "mixed 256/512"),
+    ],
+)
+def test_strict_verse_runtime_rejects_unsupported_tuple(
+    fake_cc,
+    monkeypatch,
+    capability,
+    cache_dtype,
+    backend,
+    head_dim,
+    global_head_dim,
+    error,
+):
+    monkeypatch.setenv("VLLM_VERSE_RUNTIME_STRICT", "1")
+    fake_cc(capability)
+    cfg = _mock_vllm_config(
+        backend=backend,
+        cache_dtype=cache_dtype,
+        head_dim=head_dim,
+        global_head_dim=global_head_dim,
+    )
+    with pytest.raises(ValueError, match=error):
+        _gemma4_route(cfg)
+
+
+def test_strict_verse_runtime_requires_vo_split(fake_cc, monkeypatch):
+    monkeypatch.setenv("VLLM_VERSE_RUNTIME_STRICT", "1")
+    monkeypatch.setenv("VLLM_NVFP4_KV_VOSPLIT", "0")
+    fake_cc(CC12_0)
+    with pytest.raises(ValueError, match="VLLM_NVFP4_KV_VOSPLIT=1"):
+        _gemma4_route(_mock_vllm_config())

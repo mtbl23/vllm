@@ -217,7 +217,11 @@ class Gemma4Config(VerifyAndUpdateConfig):
             for i in range(min(arch_config.total_num_hidden_layers, len(layer_types)))
         }
 
-        if len(set(head_dims.values())) <= 1:
+        import vllm.envs as envs
+        from vllm.platforms import current_platform
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        if len(set(head_dims.values())) <= 1 and not envs.VLLM_VERSE_RUNTIME_STRICT:
             return
 
         # NVFP4 KV cache on consumer Blackwell (CC 12.x): the FlashInfer
@@ -227,11 +231,42 @@ class Gemma4Config(VerifyAndUpdateConfig):
         # the TRITON_ATTN fallback below. Gated on VLLM_NVFP4_KV_VOSPLIT
         # (default-on for nvfp4) and only when the user did not pin a
         # backend. Returns before the FA4/Triton selection.
-        import vllm.envs as envs
-        from vllm.platforms import current_platform
-        from vllm.v1.attention.backends.registry import AttentionBackendEnum
-
         cache_config = vllm_config.cache_config
+        if envs.VLLM_VERSE_RUNTIME_STRICT:
+            cache_dtype = cache_config.cache_dtype if cache_config is not None else ""
+            requested_backend = vllm_config.attention_config.backend
+            supported_geometry = set(head_dims.values()) == {256, 512}
+            if not current_platform.is_device_capability_family(120):
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires consumer Blackwell "
+                    "compute capability 12.x."
+                )
+            if not cache_dtype.startswith("nvfp4"):
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires an NVFP4 KV cache."
+                )
+            if not envs.VLLM_NVFP4_KV_VOSPLIT:
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires VLLM_NVFP4_KV_VOSPLIT=1."
+                )
+            if requested_backend not in (None, AttentionBackendEnum.FLASHINFER):
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime requires the FLASHINFER "
+                    "attention backend."
+                )
+            if not supported_geometry:
+                raise ValueError(
+                    "The strict Verse Gemma 4 runtime supports only the tested "
+                    "mixed 256/512 attention head geometry; got "
+                    f"{sorted(set(head_dims.values()))}."
+                )
+            vllm_config.attention_config.backend = AttentionBackendEnum.FLASHINFER
+            logger.info(
+                "Strict Verse Gemma 4 runtime validated consumer Blackwell, "
+                "NVFP4 KV, FLASHINFER, and mixed 256/512 head geometry."
+            )
+            return
+
         if (
             cache_config is not None
             and cache_config.cache_dtype.startswith("nvfp4")
