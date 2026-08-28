@@ -12,6 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from packaging.requirements import Requirement
+
 EXPECTED_DISTRIBUTIONS = {
     "flashinfer-python": "0.6.18.dev20260819",
     "flashinfer-cubin": "0.6.18.dev20260819",
@@ -21,6 +23,12 @@ EXPECTED_DISTRIBUTIONS = {
     "nvidia-nccl-cu13": "2.29.7",
 }
 EXPECTED_FLASHINFER_COMMIT = "61a6c651872a7d3f2f6dcc1ced61633d8f8ba3dd"
+EXPECTED_FLASHINFER_REQUIREMENT_URL = (
+    "https://github.com/flashinfer-ai/flashinfer/releases/download/"
+    "nightly-v0.6.18-20260819/"
+    "flashinfer_python-0.6.18.dev20260819-py3-none-any.whl"
+    "#sha256=50ad966220b5160f17fcb9e064bdfbcda726ec779fb0c74fd3449b3c48c66600"
+)
 VLLM_WHEEL_VERSION_RE = re.compile(r"0\.28\.0\+verse\.[0-9a-f]{12}")
 
 
@@ -50,6 +58,45 @@ def require(condition: bool, message: str) -> None:
         raise SystemExit(message)
 
 
+def verify_vllm_wheel_requirements(
+    distribution: importlib.metadata.Distribution,
+) -> dict[str, str]:
+    parsed: dict[str, list[Requirement]] = {}
+    for raw in distribution.requires or []:
+        requirement = Requirement(raw)
+        parsed.setdefault(normalized(requirement.name), []).append(requirement)
+
+    def exactly_one(name: str) -> Requirement:
+        matches = parsed.get(normalized(name), [])
+        require(len(matches) == 1, f"expected exactly one {name} wheel requirement")
+        return matches[0]
+
+    flashinfer = exactly_one("flashinfer-python")
+    require(
+        flashinfer.url == EXPECTED_FLASHINFER_REQUIREMENT_URL,
+        f"wrong FlashInfer wheel requirement: {flashinfer}",
+    )
+    cutlass = exactly_one("nvidia-cutlass-dsl")
+    require(
+        str(cutlass.specifier) == "==4.7.0" and cutlass.extras == {"cu13"},
+        f"wrong CUTLASS wheel requirement: {cutlass}",
+    )
+    cudnn = exactly_one("nvidia-cudnn-frontend")
+    require(
+        str(cudnn.specifier) == "==1.27.0" and not cudnn.extras,
+        f"wrong cuDNN frontend wheel requirement: {cudnn}",
+    )
+    require(
+        "quack-kernels" not in parsed,
+        "the Verse wheel still requires quack-kernels",
+    )
+    return {
+        "flashinfer-python": str(flashinfer),
+        "nvidia-cutlass-dsl": str(cutlass),
+        "nvidia-cudnn-frontend": str(cudnn),
+    }
+
+
 def main() -> int:
     args = parse_args()
     require(sys.version_info[:2] == (3, 12), "Verse image requires Python 3.12")
@@ -73,7 +120,12 @@ def main() -> int:
         vllm_matches[0].version == vllm_wheel_version,
         f"wrong vllm wheel: {vllm_matches[0].version}",
     )
+    wheel_requirements = verify_vllm_wheel_requirements(vllm_matches[0])
     paths["vllm"] = str(Path(vllm_matches[0].locate_file("")).resolve())
+    require(
+        not distributions.get("deep-ep"),
+        "DeepEP must not be installed in the single-GPU Verse appliance",
+    )
     for name, version in EXPECTED_DISTRIBUTIONS.items():
         matches = distributions.get(normalized(name), [])
         require(len(matches) == 1, f"expected exactly one {name} distribution")
@@ -136,6 +188,7 @@ def main() -> int:
                 "torch": torch.__version__,
                 "torch_cuda": torch.version.cuda,
                 "vllm_wheel_version": vllm_wheel_version,
+                "vllm_wheel_requirements": wheel_requirements,
                 "flashinfer_commit": commit,
                 "distributions": EXPECTED_DISTRIBUTIONS,
                 "distribution_paths": paths,

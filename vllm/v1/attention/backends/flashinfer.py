@@ -1622,7 +1622,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         needs_seq_lens_cpu = self.use_dcp or use_cascade or not all_uses_trtllm
         if needs_seq_lens_cpu:
             with gpu_sync_allowed():
-                seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+                if self.use_fa2_nvfp4_kv:
+                    # The strict Verse path consumes CPU planning metadata, but
+                    # should reuse the scheduler-owned copy when available and
+                    # avoid the deprecated property (and its implicit sync).
+                    seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+                    if seq_lens_cpu is None:
+                        seq_lens_cpu = common_attn_metadata.seq_lens.to("cpu")
+                else:
+                    seq_lens_cpu = common_attn_metadata.seq_lens_cpu
             seq_lens_np = seq_lens_cpu.numpy()
             num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
         else:

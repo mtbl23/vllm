@@ -160,6 +160,10 @@ docker run --rm \
   --entrypoint /bin/bash \
   "$VERSE_VLLM_IMAGE" \
   -euo pipefail -c '
+    # FlashInfer 0.6.18 imports a deprecated CUTLASS compatibility alias.
+    # Suppress only that pinned third-party warning; every other warning still
+    # fails the clean-oracle check below.
+    export PYTHONWARNINGS=ignore::DeprecationWarning:flashinfer.cute_dsl.utils
     /usr/local/bin/verify-verse-sm120-image --require-gpu
     GPU_IDENTITY=$(LC_ALL=C nvidia-smi \
       --query-gpu=name,uuid,memory.total,driver_version \

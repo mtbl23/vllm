@@ -1101,6 +1101,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         grep -Eq '^0\.28\.0\+verse\.[0-9a-f]{12}$' \
     && test "$(uname -m)" = "x86_64" \
     && uv pip uninstall --system \
+        deep_ep \
         flashinfer-python \
         flashinfer-cubin \
         flashinfer-jit-cache \
