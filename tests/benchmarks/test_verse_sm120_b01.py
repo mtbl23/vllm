@@ -20,7 +20,7 @@ def test_parse_metrics_accepts_vllm_colon_names():
 vllm:generation_tokens_total{engine="0"} 125
 vllm:num_requests_running{engine="0"} 38
 vllm:num_requests_waiting{engine="0"} 0
-vllm:num_preemptions{engine="0"} 4
+vllm:num_preemptions_total{engine="0"} 4
 """
 
     assert MODULE.parse_metrics(metrics) == MODULE.MetricSnapshot(
@@ -165,7 +165,7 @@ vllm:generation_tokens_total{engine="0"} 125
 vllm:generation_tokens_total{engine="1"} 126
 vllm:num_requests_running{engine="0"} 38
 vllm:num_requests_waiting{engine="0"} 0
-vllm:num_preemptions{engine="0"} 0
+vllm:num_preemptions_total{engine="0"} 0
 """
 
     try:

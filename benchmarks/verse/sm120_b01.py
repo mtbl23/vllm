@@ -218,7 +218,7 @@ def parse_metrics(text: str) -> MetricSnapshot:
             series["running"].append(value)
         elif normalized.endswith("num_requests_waiting"):
             series["waiting"].append(value)
-        elif normalized.endswith("num_preemptions"):
+        elif normalized.endswith("num_preemptions_total"):
             series["preemptions"].append(value)
     for name, values in series.items():
         if len(values) != 1:
