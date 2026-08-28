@@ -44,7 +44,7 @@ nohup "${PROFILE_PREFIX[@]}" /usr/bin/python3 /usr/local/bin/vllm serve \
   --max-model-len 6144 \
   --block-size 16 \
   --max-num-seqs 38 \
-  --max-num-batched-tokens 256 \
+  --max-num-batched-tokens 512 \
   --gpu-memory-utilization 0.94 \
   --kv-cache-memory-bytes 5704253440 \
   --kv-cache-dtype nvfp4 \

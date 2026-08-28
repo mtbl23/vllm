@@ -9,20 +9,22 @@ free-model runtime:
 - explicit HND physical KV layout
 - 6,144-token context
 - synchronous B01 scheduling with at most 38 active sequences
-- 256-token chunked-prefill batches, leaving 38-way decode capacity and KV reserve
+- 512-token chunked-prefill batches, the measured decode/prefill interference knee
 - FlashInfer's CUTLASS-4.7-compatible SM120 B12X backend for native W4A4 GEMM
 - prefix caching and the hybrid KV manager enabled
-- eager-only execution for the first correctness release
+- full-decode-only CUDA graphs at fixed capture sizes through 38 requests
 
-The profile deliberately excludes multimodal inputs, XQA, Triton attention,
-CUDA graphs, BoN, ranking, speculative decoding, and KV offload. The Verse
-gateway remains responsible for authentication, quotas, queue admission,
-prompt construction, streaming, and retries.
+The profile deliberately excludes multimodal inputs, Triton attention, BoN,
+ranking, speculative decoding, and KV offload. Exact D512 Gemma 4 decode uses
+the Verse-qualified FlashInfer XQA route; prefill and unsupported shapes remain
+on the pinned FA2 path. The Verse gateway remains responsible for
+authentication, quotas, queue admission, prompt construction, streaming, and
+retries.
 
-CUDA graphs are disabled intentionally. The pinned native FA2 VO-split path is
-correct in eager mode, while the current FlashInfer prefill-wrapper lifecycle
-can hang full server startup during graph capture. Graph-safe decode is a
-separate second phase and cannot be enabled by a launch override.
+CUDA graphs are restricted to decode intentionally. The pinned native FA2
+VO-split path handles prefill outside graph capture, while fixed decode-only
+capture sizes cover 1, 8, 16, 24, 32, and 38 active requests. Other graph modes
+cannot be enabled by a launch override.
 
 ## Build
 
@@ -83,7 +85,7 @@ the serving process runs as UID 2000/GID 0 with every Linux capability dropped.
 
 The container first starts with automatic restart disabled. The launcher waits
 for health, checks authenticated model discovery and strict kernel markers, and
-runs both streaming and deterministic-token inference. Only after those checks
+runs both streaming and repeated greedy inference. Only after those checks
 pass does it enable `unless-stopped` restart behavior and print `status=ready`.
 A failed startup removes only the newly-created candidate container. The model
 mount remains read-only and its full manifest inventory is rehashed on every
@@ -148,7 +150,7 @@ tools/verse/run_sm120_acceptance.sh
 
 The runner first exercises Verse's real message-based `/tokenize` and
 streaming `/v1/chat/completions` shapes, including sampling extensions, SSE
-termination, repeatable deterministic tokens with finite logprobs, exact
+termination, repeated exact-length greedy runs with finite logprobs, exact
 6,144-token admission, 6,145-token rejection, and 38 distinct concurrent
 boundary requests without preemption. It then runs one disjoint-prefix trial
 without an explicit prewarm and two explicitly prewarmed B01 trials at 1K and

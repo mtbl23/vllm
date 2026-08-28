@@ -351,24 +351,41 @@ def validate_chat_contract(payload: dict[str, Any]) -> None:
     )
     require(int(payload.get("ordinary_prompt_tokens", 0)) > 0, "missing prompt")
     validate_stream(payload.get("ordinary_stream"), 2)
-    deterministic = payload.get("deterministic_completion")
-    require(isinstance(deterministic, dict), "missing deterministic evidence")
-    require(
-        int(deterministic.get("completion_tokens", -1)) == 16,
-        "deterministic completion used the wrong token count",
-    )
-    require(
-        SHA256_RE.fullmatch(str(deterministic.get("content_sha256", ""))) is not None
-        and SHA256_RE.fullmatch(str(deterministic.get("tokens_sha256", "")))
-        is not None,
-        "deterministic completion hashes are invalid",
-    )
-    for key in ("minimum_logprob", "maximum_logprob"):
+    greedy = payload.get("greedy_decode_evidence")
+    require(isinstance(greedy, dict), "missing greedy decode evidence")
+
+    def validate_fingerprint(value: Any, expected_tokens: int, name: str) -> None:
+        require(isinstance(value, dict), f"{name} is not an object")
         require(
-            isinstance(deterministic.get(key), int | float)
-            and math.isfinite(float(deterministic[key])),
-            "deterministic completion contains a non-finite logprob",
+            int(value.get("completion_tokens", -1)) == expected_tokens,
+            f"{name} used the wrong token count",
         )
+        require(
+            SHA256_RE.fullmatch(str(value.get("content_sha256", ""))) is not None
+            and SHA256_RE.fullmatch(str(value.get("tokens_sha256", ""))) is not None,
+            f"{name} hashes are invalid",
+        )
+        for key in ("minimum_logprob", "maximum_logprob"):
+            require(
+                isinstance(value.get(key), int | float)
+                and math.isfinite(float(value[key])),
+                f"{name} contains a non-finite logprob",
+            )
+
+    first_token_runs = greedy.get("greedy_first_token_runs")
+    require(
+        isinstance(first_token_runs, list) and len(first_token_runs) == 2,
+        "greedy decode evidence does not contain two first-token runs",
+    )
+    for index, run in enumerate(first_token_runs):
+        validate_fingerprint(run, 1, f"greedy first-token run {index}")
+    decode_runs = greedy.get("greedy_decode_runs")
+    require(
+        isinstance(decode_runs, list) and len(decode_runs) == 2,
+        "greedy decode evidence does not contain two runs",
+    )
+    for index, run in enumerate(decode_runs):
+        validate_fingerprint(run, 16, f"greedy decode run {index}")
     require(
         int(payload.get("boundary_accepted_prompt_tokens", -1)) == 6143,
         "6143+1 boundary acceptance is absent",
@@ -383,8 +400,8 @@ def validate_chat_contract(payload: dict[str, Any]) -> None:
     require(isinstance(capacity, dict), "missing exact capacity evidence")
     expected_capacity = {
         "concurrency": EXPECTED_CONCURRENCY,
-        "prompt_tokens_per_request": 6080,
-        "max_tokens_per_request": 64,
+        "prompt_tokens_per_request": 4096,
+        "max_tokens_per_request": 2048,
         "context_tokens_per_request": 6144,
         "observed_max_running": EXPECTED_CONCURRENCY,
     }
@@ -392,6 +409,48 @@ def validate_chat_contract(payload: dict[str, Any]) -> None:
         require(
             int(capacity.get(key, -1)) == expected,
             f"capacity evidence has the wrong {key}",
+        )
+    expected_completion_tokens = (
+        EXPECTED_CONCURRENCY * expected_capacity["max_tokens_per_request"]
+    )
+    require(
+        int(capacity.get("simultaneous_decoding_streams", -1)) == EXPECTED_CONCURRENCY,
+        "capacity evidence did not prove all streams decoding simultaneously",
+    )
+    require(
+        int(capacity.get("verified_exact_completion_streams", -1))
+        == EXPECTED_CONCURRENCY,
+        "capacity evidence did not verify every stream completion",
+    )
+    require(
+        int(capacity.get("observed_completion_tokens_total", -1))
+        == expected_completion_tokens,
+        "capacity evidence has the wrong total completion token count",
+    )
+    require(
+        int(capacity.get("observed_length_finish_streams", -1)) == EXPECTED_CONCURRENCY,
+        "capacity evidence did not prove length finishes for every stream",
+    )
+    require(
+        float(capacity.get("kv_cache_usage_at_simultaneous_decode", 0)) > 0,
+        "capacity evidence has no positive KV occupancy at simultaneous decode",
+    )
+    stream_evidence = capacity.get("stream_completion_evidence")
+    require(
+        isinstance(stream_evidence, list)
+        and len(stream_evidence) == EXPECTED_CONCURRENCY,
+        "capacity evidence has incomplete per-stream completion evidence",
+    )
+    for index, stream in enumerate(stream_evidence):
+        require(
+            isinstance(stream, dict)
+            and int(stream.get("stream_index", -1)) == index
+            and int(stream.get("completion_tokens", -1))
+            == expected_capacity["max_tokens_per_request"]
+            and int(stream.get("usage_completion_tokens", -1))
+            == expected_capacity["max_tokens_per_request"]
+            and stream.get("finish_reason") == "length",
+            f"capacity stream {index} has invalid completion evidence",
         )
     require(
         int(capacity.get("running_metric_samples", 0)) > 0,

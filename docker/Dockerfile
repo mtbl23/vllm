@@ -1080,6 +1080,7 @@ ENTRYPOINT ["vllm", "serve"]
 FROM vllm-openai AS vllm-openai-verse-sm120
 ARG CUDA_VERSION
 ARG VLLM_VERSION_OVERRIDE
+RUN rm -rf /vllm-workspace/benchmarks /vllm-workspace/examples
 COPY requirements/verse-sm120-flashinfer.lock \
     /opt/verse/requirements/verse-sm120-flashinfer.lock
 COPY tools/verse/verify_sm120_image.py \

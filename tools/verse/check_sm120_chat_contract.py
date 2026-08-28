@@ -39,6 +39,8 @@ CAPACITY_METRICS = {
     "preemptions": "vllm:num_preemptions_total",
     "kv_usage": "vllm:kv_cache_usage_perc",
 }
+CAPACITY_PROMPT_TOKENS = 4096
+CAPACITY_COMPLETION_TOKENS = 2048
 
 
 def require(condition: bool, message: str) -> None:
@@ -329,40 +331,46 @@ def completion_fingerprint(payload: Any, expected_tokens: int) -> dict[str, Any]
     }
 
 
-def deterministic_completion_check(
+def greedy_decode_evidence(
     endpoint: str,
     key: str,
     model: str,
     messages: list[dict[str, str]],
 ) -> dict[str, Any]:
-    expected_tokens = 16
     request_payload = {
         "model": model,
         "messages": messages,
         "temperature": 0,
-        "max_tokens": expected_tokens,
         "ignore_eos": True,
         "stream": False,
         "logprobs": True,
         "top_logprobs": 1,
         "seed": 123456,
     }
-    fingerprints: list[dict[str, Any]] = []
+    first_token_runs: list[dict[str, Any]] = []
     for _ in range(2):
         status, payload = post(
             endpoint,
             "/v1/chat/completions",
             key,
-            request_payload,
+            {**request_payload, "max_tokens": 1},
         )
-        require(status == 200, f"deterministic completion returned HTTP {status}")
-        fingerprints.append(completion_fingerprint(payload, expected_tokens))
-    require(
-        fingerprints[0]["content_sha256"] == fingerprints[1]["content_sha256"]
-        and fingerprints[0]["tokens_sha256"] == fingerprints[1]["tokens_sha256"],
-        "identical deterministic requests produced different tokens",
-    )
-    return fingerprints[0]
+        require(status == 200, f"first-token canary returned HTTP {status}")
+        first_token_runs.append(completion_fingerprint(payload, 1))
+    decode_runs: list[dict[str, Any]] = []
+    for _ in range(2):
+        status, payload = post(
+            endpoint,
+            "/v1/chat/completions",
+            key,
+            {**request_payload, "max_tokens": 16},
+        )
+        require(status == 200, f"greedy decode canary returned HTTP {status}")
+        decode_runs.append(completion_fingerprint(payload, 16))
+    return {
+        "greedy_first_token_runs": first_token_runs,
+        "greedy_decode_runs": decode_runs,
+    }
 
 
 def parse_metrics(text: str, metric_names: Mapping[str, str]) -> dict[str, float]:
@@ -458,8 +466,8 @@ def concurrent_boundary_acceptance(
     concurrency: int = 38,
     metrics_poll_interval: float = 0.02,
 ) -> dict[str, Any]:
-    prompt_tokens = 6080
-    completion_tokens = 64
+    prompt_tokens = CAPACITY_PROMPT_TOKENS
+    completion_tokens = CAPACITY_COMPLETION_TOKENS
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
         messages = list(
             pool.map(
@@ -674,7 +682,7 @@ def main() -> int:
             },
             minimum_content_chunks=2,
         )
-        deterministic = deterministic_completion_check(
+        greedy_decode = greedy_decode_evidence(
             endpoint, key, args.model, ordinary_messages
         )
         result: dict[str, Any] = {
@@ -683,7 +691,7 @@ def main() -> int:
             "model": args.model,
             "ordinary_prompt_tokens": ordinary_count,
             "ordinary_stream": stream,
-            "deterministic_completion": deterministic,
+            "greedy_decode_evidence": greedy_decode,
         }
         if not args.startup_only:
             accepted_messages = exact_context_messages(

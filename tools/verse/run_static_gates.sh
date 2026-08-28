@@ -10,7 +10,9 @@ PYTHON_FILES=(
   benchmarks/verse/sm120_b12x_tactics.py
   benchmarks/verse/sm120_lm_head.py
   benchmarks/verse/sm120_nvfp4_decode_backends.py
+  benchmarks/verse/sm120_prefill_interference.py
   tests/benchmarks/test_verse_sm120_b01.py
+  tests/benchmarks/test_verse_sm120_prefill_interference.py
   tests/kernels/attention/test_flashinfer.py
   tests/kernels/quantization/nvfp4_utils.py
   tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py
@@ -63,7 +65,9 @@ uv run --no-project --with pytest==9.1.0 python -m pytest -q \
   tests/tools/test_verse_sm120_chat_contract.py \
   tests/tools/test_verse_sm120_churn.py
 uv run --no-project --with pytest==9.1.0 python -m pytest -q \
-  --confcutdir=tests/benchmarks tests/benchmarks/test_verse_sm120_b01.py
+  --confcutdir=tests/benchmarks \
+  tests/benchmarks/test_verse_sm120_b01.py \
+  tests/benchmarks/test_verse_sm120_prefill_interference.py
 
 grep -Fxq \
   'flashinfer-python @ https://github.com/flashinfer-ai/flashinfer/releases/download/nightly-v0.6.18-20260819/flashinfer_python-0.6.18.dev20260819-py3-none-any.whl#sha256=50ad966220b5160f17fcb9e064bdfbcda726ec779fb0c74fd3449b3c48c66600' \
@@ -105,6 +109,7 @@ grep -Fq 'cloudflare_route.py' tools/verse/SM120_CUTOVER_RUNBOOK.md
 grep -Fq -- '--cap-drop ALL' tools/verse/run_sm120_server.sh
 grep -Fq -- '--user 2000:0' tools/verse/run_sm120_server.sh
 grep -Fq 'USER 2000:0' docker/Dockerfile
+grep -Fq 'rm -rf /vllm-workspace/benchmarks /vllm-workspace/examples' docker/Dockerfile
 grep -Fq 'FLASHINFER_WORKSPACE_BASE=/cache/flashinfer' docker/Dockerfile
 if grep -Eq -- '--ipc host' \
   tools/verse/run_sm120_server.sh tools/verse/run_sm120_cuda_gates.sh; then
@@ -113,7 +118,7 @@ if grep -Eq -- '--ipc host' \
 fi
 grep -Fq 'self.disable_split_kv = True' \
   vllm/v1/attention/backends/flashinfer.py
-grep -Fq 'return AttentionCGSupport.NEVER' \
+grep -Fq 'return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE' \
   vllm/v1/attention/backends/flashinfer.py
 grep -Fq \
   'pytorch/manylinux2_28-builder:cuda13.0@sha256:7710cbc19d7ee951134e2e827f8ec89237c993095eb2581dd5e74f58e4e278c7' \

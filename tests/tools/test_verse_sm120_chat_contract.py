@@ -236,6 +236,48 @@ def test_completion_fingerprint_rejects_non_finite_logprob():
         raise AssertionError("a NaN model logprob was accepted")
 
 
+def _completion_payload(token: str, count: int) -> dict:
+    return {
+        "choices": [
+            {
+                "message": {"content": token * count},
+                "logprobs": {
+                    "content": [
+                        {"token": token, "logprob": -0.25} for _ in range(count)
+                    ]
+                },
+            }
+        ],
+        "usage": {"completion_tokens": count},
+    }
+
+
+def test_greedy_decode_evidence_records_repeated_valid_runs(monkeypatch):
+    responses = iter(
+        [
+            (200, _completion_payload("d", 1)),
+            (200, _completion_payload("a", 1)),
+            (200, _completion_payload("b", 16)),
+            (200, _completion_payload("c", 16)),
+        ]
+    )
+    monkeypatch.setattr(MODULE, "post", lambda *args, **kwargs: next(responses))
+
+    result = MODULE.greedy_decode_evidence("http://127.0.0.1:8000", "key", "model", [])
+
+    assert len(result["greedy_first_token_runs"]) == 2
+    assert result["greedy_first_token_runs"][0]["completion_tokens"] == 1
+    assert (
+        result["greedy_first_token_runs"][0]["tokens_sha256"]
+        != result["greedy_first_token_runs"][1]["tokens_sha256"]
+    )
+    assert len(result["greedy_decode_runs"]) == 2
+    assert (
+        result["greedy_decode_runs"][0]["tokens_sha256"]
+        != result["greedy_decode_runs"][1]["tokens_sha256"]
+    )
+
+
 def test_capacity_probe_overlaps_all_requests_and_observes_running(monkeypatch):
     concurrency = 4
     active = 0
@@ -259,12 +301,12 @@ def test_capacity_probe_overlaps_all_requests_and_observes_running(monkeypatch):
         with lock:
             active -= 1
         return {
-            "chunks": 64,
-            "content_chunks": 64,
-            "content_characters": 64,
+            "chunks": MODULE.CAPACITY_COMPLETION_TOKENS,
+            "content_chunks": MODULE.CAPACITY_COMPLETION_TOKENS,
+            "content_characters": MODULE.CAPACITY_COMPLETION_TOKENS,
             "saw_done": True,
-            "completion_tokens": 64,
-            "usage_completion_tokens": 64,
+            "completion_tokens": MODULE.CAPACITY_COMPLETION_TOKENS,
+            "usage_completion_tokens": MODULE.CAPACITY_COMPLETION_TOKENS,
             "finish_reason": "length",
         }
 
@@ -300,29 +342,35 @@ def test_capacity_probe_overlaps_all_requests_and_observes_running(monkeypatch):
     assert result["simultaneous_decoding_streams"] == concurrency
     assert result["kv_cache_usage_at_simultaneous_decode"] == 0.75
     assert result["verified_exact_completion_streams"] == concurrency
-    assert result["observed_completion_tokens_total"] == concurrency * 64
+    assert (
+        result["observed_completion_tokens_total"]
+        == concurrency * MODULE.CAPACITY_COMPLETION_TOKENS
+    )
     assert result["observed_length_finish_streams"] == concurrency
     assert result["stream_completion_evidence"] == [
         {
             "stream_index": index,
-            "completion_tokens": 64,
-            "usage_completion_tokens": 64,
+            "completion_tokens": MODULE.CAPACITY_COMPLETION_TOKENS,
+            "usage_completion_tokens": MODULE.CAPACITY_COMPLETION_TOKENS,
             "finish_reason": "length",
         }
         for index in range(concurrency)
     ]
-    assert result["prompt_tokens_per_request"] == 6080
-    assert result["max_tokens_per_request"] == 64
+    assert result["prompt_tokens_per_request"] == MODULE.CAPACITY_PROMPT_TOKENS
+    assert result["max_tokens_per_request"] == MODULE.CAPACITY_COMPLETION_TOKENS
     payloads = [payload for payload, _kwargs in calls]
     assert len({payload["messages"][0]["content"] for payload in payloads}) == 4
-    assert all(payload["max_tokens"] == 64 for payload in payloads)
+    assert all(
+        payload["max_tokens"] == MODULE.CAPACITY_COMPLETION_TOKENS
+        for payload in payloads
+    )
     assert all(payload["ignore_eos"] is True for payload in payloads)
     assert all(payload["logprobs"] is True for payload in payloads)
     assert all(
         payload["stream_options"] == {"include_usage": True} for payload in payloads
     )
     assert all(
-        kwargs["expected_completion_tokens"] == 64
+        kwargs["expected_completion_tokens"] == MODULE.CAPACITY_COMPLETION_TOKENS
         and kwargs["expected_finish_reason"] == "length"
         for _payload, kwargs in calls
     )
@@ -351,12 +399,12 @@ def test_capacity_probe_rejects_preemption(monkeypatch):
         with lock:
             active -= 1
         return {
-            "chunks": 64,
-            "content_chunks": 64,
-            "content_characters": 64,
+            "chunks": MODULE.CAPACITY_COMPLETION_TOKENS,
+            "content_chunks": MODULE.CAPACITY_COMPLETION_TOKENS,
+            "content_characters": MODULE.CAPACITY_COMPLETION_TOKENS,
             "saw_done": True,
-            "completion_tokens": 64,
-            "usage_completion_tokens": 64,
+            "completion_tokens": MODULE.CAPACITY_COMPLETION_TOKENS,
+            "usage_completion_tokens": MODULE.CAPACITY_COMPLETION_TOKENS,
             "finish_reason": "length",
         }
 
@@ -409,12 +457,12 @@ def test_capacity_probe_rejects_running_only_without_decode_evidence(monkeypatch
         with lock:
             active -= 1
         return {
-            "chunks": 64,
-            "content_chunks": 64,
-            "content_characters": 64,
+            "chunks": MODULE.CAPACITY_COMPLETION_TOKENS,
+            "content_chunks": MODULE.CAPACITY_COMPLETION_TOKENS,
+            "content_characters": MODULE.CAPACITY_COMPLETION_TOKENS,
             "saw_done": True,
-            "completion_tokens": 64,
-            "usage_completion_tokens": 64,
+            "completion_tokens": MODULE.CAPACITY_COMPLETION_TOKENS,
+            "usage_completion_tokens": MODULE.CAPACITY_COMPLETION_TOKENS,
             "finish_reason": "length",
         }
 
@@ -461,7 +509,7 @@ def test_startup_only_avoids_boundary_capacity(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(MODULE, "stream_chat", stream_chat)
     monkeypatch.setattr(
         MODULE,
-        "deterministic_completion_check",
+        "greedy_decode_evidence",
         lambda *args, **kwargs: {"content_sha256": "a", "tokens_sha256": "b"},
     )
     monkeypatch.setattr(

@@ -91,7 +91,7 @@ def base_container(tmp_path: Path) -> tuple[dict, list[str]]:
         "--max-num-seqs",
         "38",
         "--max-num-batched-tokens",
-        "256",
+        "512",
         "--gpu-memory-utilization",
         "0.94",
         "--kv-cache-memory-bytes",

@@ -79,7 +79,7 @@ def _mock_vllm_config(
     language_model_only=True,
     max_model_len=6144,
     max_num_seqs=38,
-    max_num_batched_tokens=256,
+    max_num_batched_tokens=512,
     enforce_eager=False,
     linear_backend="flashinfer_b12x",
     cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
@@ -341,7 +341,7 @@ def test_strict_verse_runtime_requires_hnd_layout(fake_cc, monkeypatch):
     [
         ({"max_model_len": 8192}, "max_model_len=6144"),
         ({"max_num_seqs": 40}, "max_num_seqs=38"),
-        ({"max_num_batched_tokens": 512}, "max_num_batched_tokens=256"),
+        ({"max_num_batched_tokens": 256}, "max_num_batched_tokens=512"),
         ({"async_scheduling": True}, "synchronous B01"),
         ({"speculative": True}, "speculative decoding"),
         ({"tensor_parallel_size": 2}, "TP1/PP1/DP1/DCP1"),

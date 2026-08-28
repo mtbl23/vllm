@@ -7,6 +7,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 MODULE_PATH = (
     Path(__file__).parents[2] / "tools" / "verse" / "finalize_sm120_release.py"
 )
@@ -104,13 +106,29 @@ def chat_contract() -> dict:
         "model": "verse-free",
         "ordinary_prompt_tokens": 64,
         "ordinary_stream": stream(),
-        "deterministic_completion": {
-            "completion_tokens": 16,
-            "content_sha256": "c" * 64,
-            "tokens_sha256": "d" * 64,
-            "content_characters": 48,
-            "minimum_logprob": -2.0,
-            "maximum_logprob": -0.1,
+        "greedy_decode_evidence": {
+            "greedy_first_token_runs": [
+                {
+                    "completion_tokens": 1,
+                    "content_sha256": character * 64,
+                    "tokens_sha256": character * 64,
+                    "content_characters": 3,
+                    "minimum_logprob": -2.0,
+                    "maximum_logprob": -0.1,
+                }
+                for character in ("c", "d")
+            ],
+            "greedy_decode_runs": [
+                {
+                    "completion_tokens": 16,
+                    "content_sha256": character * 64,
+                    "tokens_sha256": character * 64,
+                    "content_characters": 48,
+                    "minimum_logprob": -2.0,
+                    "maximum_logprob": -0.1,
+                }
+                for character in ("e", "f")
+            ],
         },
         "boundary_accepted_prompt_tokens": 6143,
         "boundary_accepted_stream": stream(1),
@@ -118,12 +136,26 @@ def chat_contract() -> dict:
         "boundary_rejected_http_status": 400,
         "exact_boundary_capacity": {
             "concurrency": 38,
-            "prompt_tokens_per_request": 6080,
-            "max_tokens_per_request": 64,
+            "prompt_tokens_per_request": 4096,
+            "max_tokens_per_request": 2048,
             "context_tokens_per_request": 6144,
             "total_stream_chunks": 76,
+            "verified_exact_completion_streams": 38,
+            "observed_completion_tokens_total": 77824,
+            "observed_length_finish_streams": 38,
+            "stream_completion_evidence": [
+                {
+                    "stream_index": index,
+                    "completion_tokens": 2048,
+                    "usage_completion_tokens": 2048,
+                    "finish_reason": "length",
+                }
+                for index in range(38)
+            ],
             "observed_max_running": 38,
+            "simultaneous_decoding_streams": 38,
             "running_metric_samples": 10,
+            "kv_cache_usage_at_simultaneous_decode": 0.9,
             "preemptions_before": 0,
             "preemptions_after": 0,
             "scheduler_running_before": 0,
@@ -454,6 +486,16 @@ def test_release_finalizer_rejects_capacity_without_real_overlap(tmp_path: Path)
         assert "observed_max_running" in str(exc)
     else:
         raise AssertionError("serialized-only capacity was accepted")
+
+
+def test_release_finalizer_rejects_incomplete_stream_evidence(tmp_path: Path):
+    release = release_tree(tmp_path)
+    payload = chat_contract()
+    payload["exact_boundary_capacity"]["stream_completion_evidence"].pop()
+    write_json(release / "short/chat-contract.json", payload)
+
+    with pytest.raises(ValueError, match="per-stream completion evidence"):
+        MODULE.finalize(release)
 
 
 def test_release_finalizer_rejects_churn_preemption(tmp_path: Path):

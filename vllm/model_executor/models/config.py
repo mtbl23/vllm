@@ -344,10 +344,10 @@ class Gemma4Config(VerifyAndUpdateConfig):
                 raise ValueError(
                     "The strict Verse Gemma 4 runtime requires max_num_seqs=38."
                 )
-            if scheduler_config.max_num_batched_tokens != 256:
+            if scheduler_config.max_num_batched_tokens != 512:
                 raise ValueError(
                     "The strict Verse Gemma 4 runtime requires "
-                    "max_num_batched_tokens=256."
+                    "max_num_batched_tokens=512."
                 )
             if scheduler_config.async_scheduling:
                 raise ValueError(
@@ -412,7 +412,7 @@ class Gemma4Config(VerifyAndUpdateConfig):
             logger.info(
                 "Strict Verse Gemma 4 runtime validated exact SM120, "
                 "NVFP4 KV, FLASHINFER, FlashInfer B12X, FULL_DECODE_ONLY "
-                "graphs, and the fixed Verse 6144/38/256 serving tuple."
+                "graphs, and the fixed Verse 6144/38/512 serving tuple."
             )
             return
 
