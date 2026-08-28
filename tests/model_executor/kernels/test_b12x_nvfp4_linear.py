@@ -136,8 +136,14 @@ def test_b12x_nvfp4_apply_calls_native_blockscaled_gemm(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         b12x_mod,
+        "_B12X_BLOCKSCALED",
+        types.SimpleNamespace(mm_nvfp4=mm_nvfp4),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        b12x_mod,
         "_import_b12x_blockscaled",
-        lambda: types.SimpleNamespace(mm_nvfp4=mm_nvfp4),
+        lambda: (_ for _ in ()).throw(AssertionError("compiled path imported module")),
     )
 
     layer = torch.nn.Module()
@@ -205,8 +211,14 @@ def test_warmup_b12x_nvfp4_dedupes_weight_signatures(monkeypatch) -> None:
     monkeypatch.setattr(b12x_mod, "current_platform", platform)
     monkeypatch.setattr(
         b12x_mod,
+        "_B12X_BLOCKSCALED",
+        types.SimpleNamespace(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        b12x_mod,
         "_import_b12x_blockscaled",
-        lambda: types.SimpleNamespace(),
+        lambda: (_ for _ in ()).throw(AssertionError("warmup imported module")),
     )
     monkeypatch.setattr(b12x_mod, "_apply_b12x_nvfp4_linear", apply)
 

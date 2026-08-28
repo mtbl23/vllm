@@ -21,6 +21,8 @@ from vllm.utils.b12x import get_b12x_intrinsics as _import_b12x_intrinsics
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
+_B12X_BLOCKSCALED = _import_b12x_blockscaled()
+
 
 def _apply_b12x_nvfp4_linear(
     x: torch.Tensor,
@@ -30,7 +32,7 @@ def _apply_b12x_nvfp4_linear(
     alpha: torch.Tensor,
     bias: torch.Tensor | None,
 ) -> torch.Tensor:
-    blockscaled = _import_b12x_blockscaled()
+    blockscaled = _B12X_BLOCKSCALED
     assert blockscaled is not None
 
     output_size = int(weight.shape[0])
@@ -85,7 +87,7 @@ def warmup_b12x_nvfp4_linear(
         layer_map.setdefault(signature, layer)
     if not layer_map:
         return 0
-    if _import_b12x_blockscaled() is None:
+    if _B12X_BLOCKSCALED is None:
         return 0
 
     token_counts = b12x_warmup_token_counts(
@@ -135,7 +137,7 @@ class B12xNvFp4LinearKernel(NvFp4LinearKernel):
             return False, "B12X NVFP4 kernels are only available on CUDA"
         if not current_platform.is_device_capability_family(120):
             return False, "B12X NVFP4 kernels require a Blackwell 12x device"
-        blockscaled = _import_b12x_blockscaled()
+        blockscaled = _B12X_BLOCKSCALED
         if blockscaled is None or _import_b12x_intrinsics() is None:
             return False, "Install the B12X backend with `pip install vllm[b12x]`"
         if not blockscaled.is_supported():
