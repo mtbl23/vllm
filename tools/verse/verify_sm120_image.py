@@ -18,6 +18,7 @@ EXPECTED_DISTRIBUTIONS = {
     "flashinfer-jit-cache": "0.6.18.dev20260819+cu130",
     "nvidia-cutlass-dsl": "4.7.0",
     "nvidia-cudnn-frontend": "1.27.0",
+    "nvidia-nccl-cu13": "2.29.7",
 }
 EXPECTED_FLASHINFER_COMMIT = "61a6c651872a7d3f2f6dcc1ced61633d8f8ba3dd"
 VLLM_WHEEL_VERSION_RE = re.compile(r"0\.28\.0\+verse\.[0-9a-f]{12}")

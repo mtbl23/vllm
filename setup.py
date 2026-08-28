@@ -15,6 +15,7 @@ from pathlib import Path
 from shutil import which
 
 import torch
+from packaging.requirements import Requirement
 from packaging.version import Version, parse
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
@@ -1320,6 +1321,22 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("common.txt")
     elif _is_cuda():
         requirements = _read_requirements("cuda.txt")
+        if os.getenv("VLLM_VERSE_SM120_WHEEL") == "1":
+            replaced = {
+                "flashinfer-cubin",
+                "flashinfer-jit-cache",
+                "flashinfer-python",
+                "nvidia-cudnn-frontend",
+                "nvidia-cutlass-dsl",
+                "quack-kernels",
+            }
+            requirements = [
+                requirement
+                for requirement in requirements
+                if Requirement(requirement.split(" #", 1)[0]).name.lower()
+                not in replaced
+            ]
+            requirements += _read_requirements("verse-sm120-wheel.txt")
         cuda_major, cuda_minor = torch.version.cuda.split(".")
         modified_requirements = []
         for req in requirements:

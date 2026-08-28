@@ -64,6 +64,9 @@
     "GIT_REPO_MOUNT_SOURCE": {
       "default": ".git"
     },
+    "VLLM_VERSE_SM120_WHEEL": {
+      "default": "0"
+    },
     "VLLM_MAX_SIZE_MB": {
       "default": "500"
     },

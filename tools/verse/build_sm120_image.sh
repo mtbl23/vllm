@@ -55,6 +55,7 @@ docker buildx build \
   --build-arg GIT_REPO_CHECK=0 \
   --build-arg GIT_REPO_MOUNT_SOURCE=tools/verse/archive-git-context \
   --build-arg VLLM_VERSION_OVERRIDE="$VLLM_WHEEL_VERSION" \
+  --build-arg VLLM_VERSE_SM120_WHEEL=1 \
   --build-arg VLLM_BUILD_COMMIT="$COMMIT" \
   --build-arg VLLM_BUILD_PIPELINE=verse-sm120 \
   --build-arg VLLM_IMAGE_TAG="$IMAGE" \

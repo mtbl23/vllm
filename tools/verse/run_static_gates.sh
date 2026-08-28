@@ -5,6 +5,7 @@ ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
 
 PYTHON_FILES=(
+  setup.py
   benchmarks/verse/sm120_b01.py
   tests/benchmarks/test_verse_sm120_b01.py
   tests/kernels/attention/test_flashinfer.py
@@ -78,6 +79,10 @@ grep -Fq -- '-r /opt/verse/requirements/verse-sm120-flashinfer.lock' \
   docker/Dockerfile
 grep -Fq "'nvidia-cutlass-dsl[cu13]==4.7.0'" docker/Dockerfile
 grep -Fq 'nvidia-cudnn-frontend==1.27.0' docker/Dockerfile
+grep -Fq 'nvidia-nccl-cu13==2.29.7' docker/Dockerfile
+grep -Fq 'VLLM_VERSE_SM120_WHEEL=1' tools/verse/build_sm120_image.sh
+grep -Fq 'flashinfer-python @ https://github.com/flashinfer-ai/flashinfer/releases/download/nightly-v0.6.18-20260819/' \
+  requirements/verse-sm120-wheel.txt
 grep -Fq 'uv pip uninstall --system' docker/Dockerfile
 grep -Fq 'quack-kernels' docker/Dockerfile
 grep -Fq '/opt/verse-tools/sm120_profile.env' docker/Dockerfile

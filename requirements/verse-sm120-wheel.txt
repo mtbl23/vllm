@@ -1,0 +1,6 @@
+# Wheel metadata for the one supported Verse SM120 appliance. The cubin and
+# CUDA 13 JIT-cache distributions remain pinned and installed separately by
+# verse-sm120-flashinfer.lock because they are not resolvable from PyPI.
+flashinfer-python @ https://github.com/flashinfer-ai/flashinfer/releases/download/nightly-v0.6.18-20260819/flashinfer_python-0.6.18.dev20260819-py3-none-any.whl#sha256=50ad966220b5160f17fcb9e064bdfbcda726ec779fb0c74fd3449b3c48c66600
+nvidia-cutlass-dsl[cu13]==4.7.0
+nvidia-cudnn-frontend==1.27.0

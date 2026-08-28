@@ -503,7 +503,9 @@ COPY --from=rust-build /workspace/vllm/_rust_*.so vllm/
 ARG GIT_REPO_CHECK=0
 ARG GIT_REPO_MOUNT_SOURCE=.git
 ARG VLLM_VERSION_OVERRIDE
-ENV VLLM_VERSION_OVERRIDE=${VLLM_VERSION_OVERRIDE}
+ARG VLLM_VERSE_SM120_WHEEL=0
+ENV VLLM_VERSION_OVERRIDE=${VLLM_VERSION_OVERRIDE} \
+    VLLM_VERSE_SM120_WHEEL=${VLLM_VERSE_SM120_WHEEL}
 RUN --mount=type=bind,source=${GIT_REPO_MOUNT_SOURCE},target=.git \
     if [ "$GIT_REPO_CHECK" != "0" ]; then bash tools/check_repo.sh ; fi
 
@@ -1106,6 +1108,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         -r /opt/verse/requirements/verse-sm120-flashinfer.lock \
         'nvidia-cutlass-dsl[cu13]==4.7.0' \
         nvidia-cudnn-frontend==1.27.0 \
+        nvidia-nccl-cu13==2.29.7 \
         pytest==9.1.0 \
     && uv pip check --system \
     && chmod 0755 \

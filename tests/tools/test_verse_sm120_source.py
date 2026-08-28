@@ -232,6 +232,7 @@ def test_image_build_streams_exact_commit_archive_and_binds_provenance(
     assert f"org.opencontainers.image.revision={commit}" in arguments
     wheel_version = f"0.28.0+verse.{commit[:12]}"
     assert f"VLLM_VERSION_OVERRIDE={wheel_version}" in arguments
+    assert "VLLM_VERSE_SM120_WHEEL=1" in arguments
     assert "GIT_REPO_CHECK=0" in arguments
     assert "GIT_REPO_MOUNT_SOURCE=tools/verse/archive-git-context" in arguments
     assert f"ai.verse.vllm.wheel.version={wheel_version}" in arguments
@@ -332,3 +333,20 @@ def test_dockerfile_preserves_upstream_git_builds_and_archive_builds():
     assert dockerfile.count("source=${GIT_REPO_MOUNT_SOURCE},target=.git") == 2
     assert "source=.git,target=.git" not in dockerfile
     assert "ENV VLLM_VERSION_OVERRIDE=${VLLM_VERSION_OVERRIDE}" in dockerfile
+    assert "VLLM_VERSE_SM120_WHEEL=${VLLM_VERSE_SM120_WHEEL}" in dockerfile
+
+
+def test_setup_metadata_has_an_explicit_verse_runtime_dependency_contract():
+    setup = (SOURCE.parents[2] / "setup.py").read_text()
+    requirements = (
+        SOURCE.parents[2] / "requirements" / "verse-sm120-wheel.txt"
+    ).read_text()
+
+    assert 'os.getenv("VLLM_VERSE_SM120_WHEEL") == "1"' in setup
+    for package in (
+        "flashinfer-python",
+        "nvidia-cutlass-dsl",
+        "nvidia-cudnn-frontend",
+    ):
+        assert package in requirements
+    assert "quack-kernels" not in requirements
