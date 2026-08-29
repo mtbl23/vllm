@@ -6,6 +6,8 @@ CADDY_IMAGE='caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9c
 CADDY_CONFIG="$ROOT/tools/verse/verse-sm120-gateway.Caddyfile"
 GATEWAY_NAME=${VERSE_SM120_GATEWAY_CONTAINER:-verse-sm120-gateway}
 VLLM_CONTAINER_ID=${VERSE_VLLM_CONTAINER_ID:-}
+RELEASE_MANIFEST=${VERSE_VLLM_RELEASE_MANIFEST:-}
+API_KEY_FILE=${VERSE_VLLM_API_KEY_FILE:-}
 
 [[ $VLLM_CONTAINER_ID =~ ^[0-9a-f]{64}$ ]] || {
   echo "VERSE_VLLM_CONTAINER_ID must be the exact 64-character candidate container ID" >&2
@@ -13,6 +15,14 @@ VLLM_CONTAINER_ID=${VERSE_VLLM_CONTAINER_ID:-}
 }
 [[ -f $CADDY_CONFIG && ! -L $CADDY_CONFIG ]] || {
   echo "the tracked gateway Caddyfile is missing or is a symlink" >&2
+  exit 1
+}
+[[ $RELEASE_MANIFEST == /* ]] || {
+  echo "VERSE_VLLM_RELEASE_MANIFEST must be absolute" >&2
+  exit 1
+}
+[[ $API_KEY_FILE == /* && -f $API_KEY_FILE && ! -L $API_KEY_FILE ]] || {
+  echo "VERSE_VLLM_API_KEY_FILE must be an absolute regular non-symlink file" >&2
   exit 1
 }
 
@@ -23,6 +33,54 @@ ACTUAL_VLLM_ID=$(docker inspect --format '{{.Id}}' "$VLLM_CONTAINER_ID")
 }
 [[ $(docker inspect --format '{{.State.Running}}' "$VLLM_CONTAINER_ID") == true ]] || {
   echo "candidate vLLM container is not running" >&2
+  exit 1
+}
+CANDIDATE_IMAGE=$(docker inspect --format '{{.Config.Image}}' "$VLLM_CONTAINER_ID")
+CANDIDATE_COMMIT=$(docker inspect \
+  --format '{{index .Config.Labels "ai.vllm.build.commit"}}' \
+  "$VLLM_CONTAINER_ID")
+PORT_BINDINGS=$(docker inspect --format '{{json .NetworkSettings.Ports}}' \
+  "$VLLM_CONTAINER_ID")
+PORT_BINDING=$(uv run --no-project python -c '
+import json, sys
+ports = json.loads(sys.stdin.read())
+if set(ports) != {"8000/tcp"}:
+    raise SystemExit("candidate has unexpected published ports")
+binding = ports["8000/tcp"]
+if binding != [{"HostIp": "127.0.0.1", "HostPort": "8000"}]:
+    raise SystemExit("candidate must publish only 127.0.0.1:8000")
+print("127.0.0.1:8000")
+' <<<"$PORT_BINDINGS")
+[[ $PORT_BINDING == 127.0.0.1:8000 ]] || {
+  echo "candidate port identity is invalid" >&2
+  exit 1
+}
+RELEASE_IDENTITY=$(uv run --script \
+  "$ROOT/tools/verse/validate_sm120_gateway_release.py" \
+  --manifest "$RELEASE_MANIFEST" \
+  --container-id "$VLLM_CONTAINER_ID" \
+  --image-digest "$CANDIDATE_IMAGE" \
+  --fork-commit "$CANDIDATE_COMMIT")
+mapfile -t RELEASE_FIELDS < <(uv run --no-project python -c '
+import json, sys
+payload = json.loads(sys.stdin.read())
+for name in (
+    "release_manifest_sha256",
+    "release_nonce",
+    "model_revision",
+):
+    print(payload[name])
+' <<<"$RELEASE_IDENTITY")
+[[ ${#RELEASE_FIELDS[@]} -eq 3 ]] || {
+  echo "release identity is incomplete" >&2
+  exit 1
+}
+RELEASE_MANIFEST_SHA256=${RELEASE_FIELDS[0]}
+RELEASE_NONCE=${RELEASE_FIELDS[1]}
+MODEL_REVISION=${RELEASE_FIELDS[2]}
+API_KEY=$(cat "$API_KEY_FILE")
+[[ -n $API_KEY && $API_KEY != *$'\n'* ]] || {
+  echo "vLLM API key must contain one non-empty line" >&2
   exit 1
 }
 if docker container inspect "$GATEWAY_NAME" >/dev/null 2>&1; then
@@ -39,8 +97,12 @@ docker run --rm \
   "$CADDY_IMAGE" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
 GATEWAY_ID=""
+MODEL_RESPONSE=""
+AUTH_HEADER=""
 cleanup_failed_gateway() {
   local status=$?
+  [[ -z $MODEL_RESPONSE ]] || rm -f "$MODEL_RESPONSE"
+  [[ -z $AUTH_HEADER ]] || rm -f "$AUTH_HEADER"
   if ((status != 0)) && [[ -n $GATEWAY_ID ]]; then
     local owned_id
     owned_id=$(docker inspect --format '{{.Id}}' "$GATEWAY_ID" 2>/dev/null || true)
@@ -65,6 +127,13 @@ GATEWAY_ID=$(docker create \
   --tmpfs /config:rw,nosuid,nodev,noexec,size=4m \
   --label ai.verse.runtime.profile=sm120-gateway-v1 \
   --label "ai.verse.upstream.container=$VLLM_CONTAINER_ID" \
+  --label "ai.verse.release.manifest.sha256=$RELEASE_MANIFEST_SHA256" \
+  --env "VERSE_CANDIDATE_CONTAINER_ID=$VLLM_CONTAINER_ID" \
+  --env "VERSE_IMAGE_DIGEST=$CANDIDATE_IMAGE" \
+  --env "VERSE_FORK_COMMIT=$CANDIDATE_COMMIT" \
+  --env "VERSE_MODEL_REVISION=$MODEL_REVISION" \
+  --env "VERSE_RELEASE_NONCE=$RELEASE_NONCE" \
+  --env "VERSE_RELEASE_MANIFEST_SHA256=$RELEASE_MANIFEST_SHA256" \
   --mount "type=bind,src=$CADDY_CONFIG,dst=/etc/caddy/Caddyfile,readonly" \
   "$CADDY_IMAGE" caddy run --config /etc/caddy/Caddyfile --adapter caddyfile)
 
@@ -84,6 +153,31 @@ until curl --noproxy '*' --fail --silent --show-error --max-time 2 \
   sleep 1
 done
 
+MODEL_RESPONSE=$(mktemp)
+AUTH_HEADER=$(mktemp)
+chmod 0600 "$AUTH_HEADER"
+printf 'Authorization: Bearer %s\n' "$API_KEY" >"$AUTH_HEADER"
+unset API_KEY
+curl --noproxy '*' --fail --silent --show-error --max-time 5 \
+  --header "@$AUTH_HEADER" \
+  http://127.0.0.1:8080/v1/models >"$MODEL_RESPONSE"
+uv run --no-project python -c '
+import json, sys
+payload = json.load(open(sys.argv[1]))
+models = {item.get("id") for item in payload.get("data", [])}
+if models != {"verse-free"}:
+    raise SystemExit("gateway exposed the wrong model identity")
+' "$MODEL_RESPONSE"
+
+for guarded_path in /invocations /tokenize /docs /openapi.json; do
+  status=$(curl --noproxy '*' --silent --output /dev/null --write-out '%{http_code}' \
+    --max-time 3 "http://127.0.0.1:8000${guarded_path}")
+  [[ $status == 401 ]] || {
+    echo "raw vLLM path $guarded_path bypassed authentication with HTTP $status" >&2
+    exit 1
+  }
+done
+
 for forbidden_path in /pause /abort_requests /invocations /metrics /docs /openapi.json; do
   status=$(curl --noproxy '*' --silent --output /dev/null --write-out '%{http_code}' \
     --max-time 3 "http://127.0.0.1:8080${forbidden_path}")
@@ -95,5 +189,6 @@ done
 
 docker update --restart unless-stopped "$GATEWAY_ID" >/dev/null
 trap - EXIT
-printf 'status=ready\ngateway_container_id=%s\nupstream_container_id=%s\nendpoint=http://127.0.0.1:8080\n' \
-  "$GATEWAY_ID" "$VLLM_CONTAINER_ID"
+rm -f "$MODEL_RESPONSE" "$AUTH_HEADER"
+printf 'status=ready\ngateway_container_id=%s\nupstream_container_id=%s\nrelease_manifest_sha256=%s\nendpoint=http://127.0.0.1:8080\n' \
+  "$GATEWAY_ID" "$VLLM_CONTAINER_ID" "$RELEASE_MANIFEST_SHA256"

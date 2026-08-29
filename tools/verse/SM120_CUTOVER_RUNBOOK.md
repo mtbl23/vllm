@@ -21,6 +21,8 @@ Create an owner-only change record outside the repository. Record:
 
 - candidate image by registry digest
 - candidate fork commit and Campaign 22 model revision
+- successful GitHub artifact-attestation verification for that exact digest,
+  source commit, protected workflow path, and branch ref
 - absolute path and SHA-256 of the candidate `release-manifest.json`
 - old service endpoint, health URL, image or artifact identity, and start command
 - new service endpoint and health URL
@@ -38,20 +40,24 @@ All conditions must be true before routing one production request:
 
 1. `release-manifest.json` has `status: pass` and
    `scope: pre_cutover_candidate_qualification`.
-2. The CUDA, chat-contract, 38-slot, B01, and two-hour heavy churn gates all came from
-   one image digest, fork commit, model revision, exact RTX 5070 Ti, and
-   container with zero restarts.
-3. The old service is healthy and remains running.
-4. The candidate is on a distinct disposable host and exact GPU UUID, with no
+2. The exact image digest has a valid GitHub artifact attestation from
+   `.github/workflows/verse-sm120-image.yml`, the expected source commit and
+   `refs/heads/verse/v0.28-sm120-nvfp4-fa2`, and a GitHub-hosted runner.
+3. The CUDA, chat-contract, 38-slot, B01, and two-hour heavy churn gates all
+   came from one image digest, fork commit, model revision, exact RTX 5070 Ti,
+   and container with zero restarts.
+4. The old service is healthy and remains running. A fresh public-route proof
+   binds its distinct rollback hostname to the recorded old tunnel UUID.
+5. The candidate is on a distinct disposable host and exact GPU UUID, with no
    production or unrelated compute process sharing that GPU.
-5. The candidate has a different Cloudflare Tunnel UUID from production.
-6. The tracked gateway is running, and cloudflared points only to its loopback
+6. The candidate has a different Cloudflare Tunnel UUID from production.
+7. The tracked gateway is running, and cloudflared points only to its loopback
    port 8080.
-7. The exact rollback target is the recorded healthy old tunnel UUID.
-8. The stable DNS record is the exact expected proxied CNAME and no deployment
+8. The exact rollback target is the recorded healthy old tunnel UUID.
+9. The stable DNS record is the exact expected proxied CNAME and no deployment
    or DNS automation can race the cutover. All Verse route changes use the same
    owner-only local deployment lock.
-9. No lifecycle command used below can select an instance by a mutable label,
+10. No lifecycle command used below can select an instance by a mutable label,
    partial name, wildcard, or unresolved environment variable.
 
 If any condition is false, stop before cutover.
@@ -61,9 +67,18 @@ If any condition is false, stop before cutover.
 Run these checks from the candidate fork's exact clean commit:
 
 ```bash
+gh attestation verify "oci://$VERSE_VLLM_IMAGE" \
+  --repo mtbl23/vllm \
+  --signer-workflow \
+    https://github.com/mtbl23/vllm/.github/workflows/verse-sm120-image.yml \
+  --source-ref refs/heads/verse/v0.28-sm120-nvfp4-fa2 \
+  --source-digest "$VERSE_VLLM_EXPECTED_COMMIT" \
+  --deny-self-hosted-runners
 tools/verse/verify_sm120_source.sh "$VERSE_VLLM_EXPECTED_COMMIT"
 tools/verse/check_sm120_server.sh
 VERSE_VLLM_CONTAINER_ID="$EXACT_CANDIDATE_CONTAINER_ID" \
+VERSE_VLLM_RELEASE_MANIFEST="$CANDIDATE_RELEASE_MANIFEST" \
+VERSE_VLLM_API_KEY_FILE="$VLLM_API_KEY_FILE" \
   tools/verse/run_sm120_gateway.sh
 curl --noproxy '*' --fail --silent --show-error "$NEW_HEALTH_URL"
 curl --noproxy '*' --fail --silent --show-error "$OLD_HEALTH_URL"
@@ -89,9 +104,23 @@ candidate hostname:
 uv run --script tools/verse/verify_sm120_public_gateway.py \
   --endpoint "$CANDIDATE_ACCESS_ORIGIN" \
   --model verse-free \
+  --target-mode qualified-candidate \
+  --target-tunnel "$NEW_TUNNEL_ID" \
+  --release-manifest "$CANDIDATE_RELEASE_MANIFEST" \
   --api-key-file "$VLLM_API_KEY_FILE" \
   --access-client-id-file "$ACCESS_CLIENT_ID_FILE" \
-  --access-client-secret-file "$ACCESS_CLIENT_SECRET_FILE"
+  --access-client-secret-file "$ACCESS_CLIENT_SECRET_FILE" \
+  >"$CHANGE_RECORD_DIR/candidate-public-proof.json"
+
+uv run --script tools/verse/verify_sm120_public_gateway.py \
+  --endpoint "$OLD_ACCESS_ORIGIN" \
+  --model verse-free \
+  --target-mode recorded-rollback \
+  --target-tunnel "$OLD_TUNNEL_ID" \
+  --api-key-file "$OLD_VLLM_API_KEY_FILE" \
+  --access-client-id-file "$ACCESS_CLIENT_ID_FILE" \
+  --access-client-secret-file "$ACCESS_CLIENT_SECRET_FILE" \
+  >"$CHANGE_RECORD_DIR/old-public-proof.json"
 
 uv run --script tools/verse/switch_sm120_cloudflare_route.py inspect \
   --zone-id "$CF_ZONE_ID" \
@@ -103,7 +132,11 @@ uv run --script tools/verse/switch_sm120_cloudflare_route.py inspect \
 
 The public-route proof must show that an unauthenticated request is rejected,
 all four required API paths work, and vLLM lifecycle, documentation, metrics,
-and invocation routes all return 404 through the public origin.
+and invocation routes all return 404 through the public origin. Create
+`CHANGE_RECORD_DIR` with mode 0700 under the operator account, set `umask 077`,
+and require both proof files to be owned by that account and not writable by
+group or other users. The candidate proof must also match all immutable
+identity headers emitted by the exact qualified gateway.
 
 ## Cutover
 
@@ -117,6 +150,9 @@ and invocation routes all return 404 through the public origin.
      --hostname free-inference.verse-rp.com \
      --expected-current-tunnel "$OLD_TUNNEL_ID" \
      --target-tunnel "$NEW_TUNNEL_ID" \
+     --target-mode qualified-candidate \
+     --target-release-manifest "$CANDIDATE_RELEASE_MANIFEST" \
+     --target-public-proof "$CHANGE_RECORD_DIR/candidate-public-proof.json" \
      --api-token-file "$CF_DNS_EDIT_TOKEN_FILE" \
      --receipt "$CHANGE_RECORD_DIR/cutover-route.json" \
      --lock "$CHANGE_RECORD_DIR/free-route.lock" \
@@ -165,6 +201,8 @@ Do not diagnose in place while users remain routed to a failing candidate.
      --hostname free-inference.verse-rp.com \
      --expected-current-tunnel "$NEW_TUNNEL_ID" \
      --target-tunnel "$OLD_TUNNEL_ID" \
+     --target-mode recorded-rollback \
+     --target-public-proof "$CHANGE_RECORD_DIR/old-public-proof.json" \
      --api-token-file "$CF_DNS_EDIT_TOKEN_FILE" \
      --receipt "$CHANGE_RECORD_DIR/rollback-route.json" \
      --lock "$CHANGE_RECORD_DIR/free-route.lock" \

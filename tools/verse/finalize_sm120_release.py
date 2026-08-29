@@ -1065,7 +1065,7 @@ def validate_image_receipt(
     expected_keys = {
         "schema_version",
         "status",
-        "approved_at",
+        "verified_at",
         "image_digest",
         "fork_commit",
         "runtime_profile",
@@ -1076,7 +1076,7 @@ def validate_image_receipt(
     require(
         set(receipt) == expected_keys
         and receipt.get("schema_version") == 1
-        and receipt.get("status") == "approved",
+        and receipt.get("status") == "identity-verified",
         "image receipt schema is invalid",
     )
     config = container.get("Config") or {}
@@ -1092,12 +1092,12 @@ def validate_image_receipt(
         "image receipt does not match the immutable container",
     )
     try:
-        approved_at = datetime.fromisoformat(str(receipt.get("approved_at", "")))
+        verified_at = datetime.fromisoformat(str(receipt.get("verified_at", "")))
     except ValueError as error:
-        raise ValueError("image receipt approval time is invalid") from error
+        raise ValueError("image receipt verification time is invalid") from error
     require(
-        approved_at.tzinfo is not None,
-        "image receipt approval time must be timezone-aware",
+        verified_at.tzinfo is not None,
+        "image receipt verification time must be timezone-aware",
     )
     binary = image_verification.get("vllm_binary_identity") or {}
     native = binary.get("native_extension") or {}

@@ -121,8 +121,19 @@ Start the gateway only after the launcher has returned the immutable
 
 ```bash
 export VERSE_VLLM_CONTAINER_ID='<exact-container-id>'
+export VERSE_VLLM_RELEASE_MANIFEST='<absolute-qualified-release-manifest>'
+export VERSE_VLLM_API_KEY_FILE='<absolute-owner-only-vllm-key-file>'
 tools/verse/run_sm120_gateway.sh
 ```
+
+The gateway refuses a mutable or mismatched upstream. The qualified manifest
+must bind the exact 64-character container ID, immutable image digest, fork
+commit, model revision, and release nonce. The candidate must publish exactly
+`127.0.0.1:8000`, and all raw vLLM application routes other than `/health` and
+`/metrics` remain bearer-authenticated even though the public gateway exposes
+neither management surface. Gateway responses include immutable candidate
+identity headers so the Access-protected public proof can bind a tunnel to the
+same qualified process before a route change.
 
 Qualification and production must use distinct Cloudflare Tunnel UUIDs. Do
 not attach a candidate connector as another replica of the production tunnel:
@@ -132,6 +143,14 @@ candidate through a separate Access-protected hostname, then switch the one
 exact stable proxied CNAME only after all release gates pass. The full
 compare-before-write procedure and its exact inverse are in
 `SM120_CUTOVER_RUNBOOK.md`.
+
+Before qualification, verify the registry digest's GitHub artifact attestation
+against the exact fork repository, image workflow, source branch, and source
+commit. The image workflow signs provenance from a GitHub-hosted runner and
+publishes both the bundle and an exact-policy verification result beside the
+image identity receipt. Version-only appliance additions are installed from
+`requirements/verse-sm120-runtime.lock` with hashes and without dependency
+resolution; the pre-existing image dependency set is checked afterward.
 
 ## Verification
 

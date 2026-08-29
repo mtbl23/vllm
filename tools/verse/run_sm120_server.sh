@@ -66,6 +66,10 @@ SERVED_MODEL=$VERSE_SERVED_MODEL_NAME
   echo "VERSE_VLLM_HOST_PORT must be a valid TCP port" >&2
   exit 1
 }
+[[ $HOST_PORT == 8000 ]] || {
+  echo "the fixed SM120 gateway contract requires VERSE_VLLM_HOST_PORT=8000" >&2
+  exit 1
+}
 [[ $GPU_DEVICE =~ ^[0-9]+$ ]] || {
   echo "VERSE_VLLM_GPU_DEVICE must be a non-negative integer" >&2
   exit 1

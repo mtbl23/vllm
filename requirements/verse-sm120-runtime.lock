@@ -1,0 +1,12 @@
+# Exact runtime-only wheels layered over the immutable CUDA 13 base image.
+# Dependencies are already supplied by that image and are validated by
+# `uv pip check`; `--no-deps` prevents the package index from introducing
+# unreviewed transitive artifacts during this appliance build.
+nvidia-cutlass-dsl[cu13]==4.7.0 \
+    --hash=sha256:f96e35c1393a8afa9a20cada1aa08fdca16d673852f3274144e3e81693f13a14
+nvidia-cudnn-frontend==1.27.0 \
+    --hash=sha256:ef1f1b4927f2f9e76a5ba83ac4bdc01a6a84750032429ea9c132599ec60c8947
+nvidia-nccl-cu13==2.29.7 \
+    --hash=sha256:edd81538446786ec3b73972543e53bb43bcaf0bfc8ef76cb679fcc390ffe136d
+pytest==9.1.0 \
+    --hash=sha256:8ebb0e7888bdf2bdfc602ec51f8f62d50200af37356c74e503c79a94f5c81f32

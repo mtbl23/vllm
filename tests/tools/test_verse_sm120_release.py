@@ -459,8 +459,8 @@ def image_receipt() -> dict:
     wheel = binary["wheel_artifact"]
     return {
         "schema_version": 1,
-        "status": "approved",
-        "approved_at": "2026-08-29T00:00:00+00:00",
+        "status": "identity-verified",
+        "verified_at": "2026-08-29T00:00:00+00:00",
         "image_digest": IMAGE_DIGEST,
         "fork_commit": FORK_COMMIT,
         "runtime_profile": MODULE.EXPECTED_PROFILE_IDENTITY,

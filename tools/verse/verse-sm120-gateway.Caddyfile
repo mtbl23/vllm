@@ -31,24 +31,48 @@ http://127.0.0.1:8080 {
 	handle @health {
 		reverse_proxy 127.0.0.1:8000 {
 			header_down -Server
+			header_down X-Verse-Candidate-Container {$VERSE_CANDIDATE_CONTAINER_ID}
+			header_down X-Verse-Image-Digest {$VERSE_IMAGE_DIGEST}
+			header_down X-Verse-Fork-Commit {$VERSE_FORK_COMMIT}
+			header_down X-Verse-Model-Revision {$VERSE_MODEL_REVISION}
+			header_down X-Verse-Release-Nonce {$VERSE_RELEASE_NONCE}
+			header_down X-Verse-Release-Manifest-Sha256 {$VERSE_RELEASE_MANIFEST_SHA256}
 			flush_interval -1
 		}
 	}
 	handle @models {
 		reverse_proxy 127.0.0.1:8000 {
 			header_down -Server
+			header_down X-Verse-Candidate-Container {$VERSE_CANDIDATE_CONTAINER_ID}
+			header_down X-Verse-Image-Digest {$VERSE_IMAGE_DIGEST}
+			header_down X-Verse-Fork-Commit {$VERSE_FORK_COMMIT}
+			header_down X-Verse-Model-Revision {$VERSE_MODEL_REVISION}
+			header_down X-Verse-Release-Nonce {$VERSE_RELEASE_NONCE}
+			header_down X-Verse-Release-Manifest-Sha256 {$VERSE_RELEASE_MANIFEST_SHA256}
 			flush_interval -1
 		}
 	}
 	handle @tokenize {
 		reverse_proxy 127.0.0.1:8000 {
 			header_down -Server
+			header_down X-Verse-Candidate-Container {$VERSE_CANDIDATE_CONTAINER_ID}
+			header_down X-Verse-Image-Digest {$VERSE_IMAGE_DIGEST}
+			header_down X-Verse-Fork-Commit {$VERSE_FORK_COMMIT}
+			header_down X-Verse-Model-Revision {$VERSE_MODEL_REVISION}
+			header_down X-Verse-Release-Nonce {$VERSE_RELEASE_NONCE}
+			header_down X-Verse-Release-Manifest-Sha256 {$VERSE_RELEASE_MANIFEST_SHA256}
 			flush_interval -1
 		}
 	}
 	handle @chat {
 		reverse_proxy 127.0.0.1:8000 {
 			header_down -Server
+			header_down X-Verse-Candidate-Container {$VERSE_CANDIDATE_CONTAINER_ID}
+			header_down X-Verse-Image-Digest {$VERSE_IMAGE_DIGEST}
+			header_down X-Verse-Fork-Commit {$VERSE_FORK_COMMIT}
+			header_down X-Verse-Model-Revision {$VERSE_MODEL_REVISION}
+			header_down X-Verse-Release-Nonce {$VERSE_RELEASE_NONCE}
+			header_down X-Verse-Release-Manifest-Sha256 {$VERSE_RELEASE_MANIFEST_SHA256}
 			flush_interval -1
 		}
 	}

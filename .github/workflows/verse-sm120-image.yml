@@ -11,6 +11,7 @@ on:
       - csrc/**
       - docker/**
       - requirements/verse-sm120-flashinfer.lock
+      - requirements/verse-sm120-runtime.lock
       - tests/kernels/attention/test_verse_sm120_nvfp4_kv_cache.py
       - tests/kernels/attention/test_flashinfer.py
       - tests/kernels/quantization/nvfp4_utils.py
@@ -22,6 +23,8 @@ on:
 
 permissions:
   contents: read
+  id-token: write
+  attestations: write
   packages: write
 
 concurrency:
@@ -64,7 +67,41 @@ jobs:
           set -o pipefail
           tools/verse/build_sm120_image.sh | tee "$RUNNER_TEMP/verse-sm120-image.txt"
 
-      - name: Create externally controlled image approval receipt
+      - name: Resolve immutable image subject
+        id: image
+        run: |
+          set -euo pipefail
+          image=$(awk -F= '$1 == "image_digest" {print $2}' "$RUNNER_TEMP/verse-sm120-image.txt")
+          test -n "$image"
+          subject_name=${image%@sha256:*}
+          subject_digest=sha256:${image##*@sha256:}
+          test "$image" = "$subject_name@$subject_digest"
+          printf 'name=%s\n' "$subject_name" >>"$GITHUB_OUTPUT"
+          printf 'digest=%s\n' "$subject_digest" >>"$GITHUB_OUTPUT"
+
+      - name: Sign image provenance
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+
+      - name: Verify signed image provenance
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          image=$(awk -F= '$1 == "image_digest" {print $2}' "$RUNNER_TEMP/verse-sm120-image.txt")
+          gh attestation verify "oci://$image" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/verse-sm120-image.yml" \
+            --source-ref "$GITHUB_REF" \
+            --source-digest "$GITHUB_SHA" \
+            --deny-self-hosted-runners \
+            --format json >"$RUNNER_TEMP/verse-sm120-attestation-verification.json"
+
+      - name: Create image identity receipt
         run: |
           set -euo pipefail
           metadata="$RUNNER_TEMP/verse-sm120-image.txt"
@@ -93,5 +130,7 @@ jobs:
           path: |
             ${{ runner.temp }}/verse-sm120-image.txt
             ${{ runner.temp }}/verse-sm120-image-receipt.json
+            ${{ runner.temp }}/verse-sm120-attestation-verification.json
+            ${{ steps.attest.outputs.bundle-path }}
           if-no-files-found: error
           retention-days: 30

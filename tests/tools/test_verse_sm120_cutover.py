@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import hashlib
 import importlib.util
 import json
 import os
 import stat
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -17,6 +19,14 @@ DUAL_LAUNCHER = ROOT / "tools" / "verse" / "run_sm120_dual_gateway.sh"
 DUAL_VERIFY = ROOT / "tools" / "verse" / "verify_sm120_dual_gateway.py"
 ROUTE_PATH = ROOT / "tools" / "verse" / "switch_sm120_cloudflare_route.py"
 PUBLIC_PATH = ROOT / "tools" / "verse" / "verify_sm120_public_gateway.py"
+VALIDATE_PATH = ROOT / "tools" / "verse" / "validate_sm120_gateway_release.py"
+sys.path.insert(0, str(ROUTE_PATH.parent))
+
+FORK_COMMIT = "b" * 40
+IMAGE_DIGEST = f"registry/runtime@sha256:{'a' * 64}"
+CONTAINER_ID = "c" * 64
+RELEASE_NONCE = "d" * 64
+MODEL_REVISION = "e2c6cd9c3302e91c032a378a607009c82ba16fac"
 
 
 def _load(name: str, path: Path):
@@ -30,6 +40,45 @@ def _load(name: str, path: Path):
 route = _load("switch_sm120_cloudflare_route", ROUTE_PATH)
 public = _load("verify_sm120_public_gateway", PUBLIC_PATH)
 dual = _load("verify_sm120_dual_gateway", DUAL_VERIFY)
+release = _load("validate_sm120_gateway_release", VALIDATE_PATH)
+
+
+def _release_manifest() -> dict:
+    return {
+        "status": "pass",
+        "scope": "pre_cutover_candidate_qualification",
+        "profile": "sm120-gemma4-nvfp4-v4",
+        "source_commit": FORK_COMMIT,
+        "model_revision": MODEL_REVISION,
+        "release_nonce": RELEASE_NONCE,
+        "container": {"id": CONTAINER_ID, "image_digest": IMAGE_DIGEST},
+    }
+
+
+def _write_target_binding(tmp_path: Path, target_tunnel: str) -> tuple[Path, Path]:
+    manifest = tmp_path / "release-manifest.json"
+    manifest.write_text(json.dumps(_release_manifest(), sort_keys=True) + "\n")
+    manifest_sha = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    proof = tmp_path / "public-proof.json"
+    proof.write_text(
+        json.dumps(
+            {
+                "status": "pass",
+                "verified_at": datetime.now(timezone.utc).isoformat(),
+                "target_tunnel": target_tunnel,
+                "target_mode": "qualified-candidate",
+                "release_manifest_sha256": manifest_sha,
+                "candidate_container_id": CONTAINER_ID,
+                "image_digest": IMAGE_DIGEST,
+                "fork_commit": FORK_COMMIT,
+                "model_revision": MODEL_REVISION,
+                "release_nonce": RELEASE_NONCE,
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    return manifest.resolve(), proof.resolve()
 
 
 def test_caddy_gateway_has_exact_allowlist_and_no_management_routes():
@@ -41,6 +90,15 @@ def test_caddy_gateway_has_exact_allowlist_and_no_management_routes():
     assert "respond 404" in text
     assert "127.0.0.1:8000" in text
     assert "0.0.0.0" not in text
+    for header in (
+        "X-Verse-Candidate-Container",
+        "X-Verse-Image-Digest",
+        "X-Verse-Fork-Commit",
+        "X-Verse-Model-Revision",
+        "X-Verse-Release-Nonce",
+        "X-Verse-Release-Manifest-Sha256",
+    ):
+        assert text.count(header) == 4
 
 
 def test_dual_gateway_is_loopback_sticky_and_fail_closed():
@@ -151,6 +209,7 @@ def test_cloudflare_route_reserves_receipt_and_rechecks_before_patch(
     target_tunnel = "66666666-7777-8888-9999-aaaaaaaaaaaa"
     current = route._tunnel_cname(current_tunnel)
     target = route._tunnel_cname(target_tunnel)
+    manifest, proof = _write_target_binding(tmp_path, target_tunnel)
     calls: list[str] = []
 
     def request(*, method, path, token, payload=None):
@@ -201,13 +260,95 @@ def test_cloudflare_route_reserves_receipt_and_rechecks_before_patch(
             str(receipt.resolve()),
             "--lock",
             str(lock.resolve()),
+            "--target-release-manifest",
+            str(manifest),
+            "--target-public-proof",
+            str(proof),
+            "--target-mode",
+            "qualified-candidate",
             "--apply",
         ],
     )
 
     assert route.main() == 0
     assert calls == ["GET", "GET", "PATCH", "GET"]
-    assert json.loads(receipt.read_text())["status"] == "verified"
+    saved = json.loads(receipt.read_text())
+    assert saved["status"] == "verified"
+    assert saved["target_binding"]["candidate_container_id"] == CONTAINER_ID
+    assert saved["target_binding"]["target_tunnel"] == target_tunnel
+
+
+def test_target_binding_rejects_proof_for_another_manifest(tmp_path: Path):
+    tunnel = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+    manifest, proof = _write_target_binding(tmp_path, tunnel)
+    payload = json.loads(proof.read_text())
+    payload["release_manifest_sha256"] = "f" * 64
+    proof.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="does not cover the target release manifest"):
+        route._validate_target_binding(
+            manifest_path=manifest,
+            proof_path=proof,
+            target_tunnel=tunnel,
+            target_mode="qualified-candidate",
+        )
+
+
+def test_recorded_rollback_requires_fresh_public_service_proof(tmp_path: Path):
+    tunnel = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+    proof = tmp_path / "rollback-proof.json"
+    proof.write_text(
+        json.dumps(
+            {
+                "status": "pass",
+                "verified_at": datetime.now(timezone.utc).isoformat(),
+                "target_mode": "recorded-rollback",
+                "target_tunnel": tunnel,
+                "endpoint": "https://old-candidate.example.com",
+                "model": "verse-free",
+                "release_manifest_sha256": None,
+            }
+        )
+    )
+    binding = route._validate_target_binding(
+        target_mode="recorded-rollback",
+        manifest_path=None,
+        proof_path=proof.resolve(),
+        target_tunnel=tunnel,
+    )
+    assert binding["target_mode"] == "recorded-rollback"
+    assert binding["model"] == "verse-free"
+
+
+def test_deployment_state_rejects_group_writable_parent(tmp_path: Path):
+    parent = tmp_path / "unsafe"
+    parent.mkdir(mode=0o770)
+    parent.chmod(0o770)
+
+    with pytest.raises(ValueError, match="group/world writable"):
+        route._reserve_receipt(parent / "receipt.json", {"status": "pending"})
+
+
+def test_release_manifest_binds_exact_candidate(tmp_path: Path):
+    manifest = tmp_path / "release-manifest.json"
+    manifest.write_text(json.dumps(_release_manifest()))
+    payload, digest = release.load_owned_file(manifest.resolve())
+    identity = release.validate(
+        payload,
+        container_id=CONTAINER_ID,
+        image_digest=IMAGE_DIGEST,
+        fork_commit=FORK_COMMIT,
+    )
+
+    assert len(digest) == 64
+    assert identity["candidate_container_id"] == CONTAINER_ID
+    with pytest.raises(ValueError, match="wrong container"):
+        release.validate(
+            payload,
+            container_id="e" * 64,
+            image_digest=IMAGE_DIGEST,
+            fork_commit=FORK_COMMIT,
+        )
 
 
 def test_public_gateway_credential_reader_rejects_broad_permissions(tmp_path: Path):

@@ -1090,6 +1090,8 @@ ARG CUDA_VERSION
 ARG VLLM_VERSION_OVERRIDE
 COPY requirements/verse-sm120-flashinfer.lock \
     /opt/verse/requirements/verse-sm120-flashinfer.lock
+COPY requirements/verse-sm120-runtime.lock \
+    /opt/verse/requirements/verse-sm120-runtime.lock
 COPY tools/verse/verify_sm120_image.py \
     /usr/local/bin/verify-verse-sm120-image
 COPY --from=build /workspace/dist/wheel-identity.json \
@@ -1121,10 +1123,8 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         nvidia-cudnn-frontend \
     && uv pip install --system \
         -r /opt/verse/requirements/verse-sm120-flashinfer.lock \
-        'nvidia-cutlass-dsl[cu13]==4.7.0' \
-        nvidia-cudnn-frontend==1.27.0 \
-        nvidia-nccl-cu13==2.29.7 \
-        pytest==9.1.0 \
+    && uv pip install --system --no-deps --require-hashes \
+        -r /opt/verse/requirements/verse-sm120-runtime.lock \
     && uv pip check --system \
     && chmod 0755 \
         /usr/local/bin/verify-verse-sm120-image \

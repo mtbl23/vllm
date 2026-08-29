@@ -335,7 +335,8 @@ def test_dockerfile_preserves_upstream_git_builds_and_archive_builds():
     assert "ENV VLLM_VERSION_OVERRIDE=${VLLM_VERSION_OVERRIDE}" in dockerfile
     assert "VLLM_VERSE_SM120_WHEEL=${VLLM_VERSE_SM120_WHEEL}" in dockerfile
     assert "ENV UV_OVERRIDE=/etc/uv-overrides-verse-sm120.txt" in dockerfile
-    assert "nvidia-nccl-cu13==2.29.7" in dockerfile
+    assert "requirements/verse-sm120-runtime.lock" in dockerfile
+    assert "--no-deps --require-hashes" in dockerfile
     assert "        deep_ep" in dockerfile
     assert "        b12x" in dockerfile
 

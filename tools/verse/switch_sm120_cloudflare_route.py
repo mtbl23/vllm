@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -20,9 +21,11 @@ import stat
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+from validate_sm120_gateway_release import load_owned_file, validate
 
 API_ROOT = "https://api.cloudflare.com/client/v4"
 HEX_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -37,6 +40,107 @@ PROXY_ENV = (
     "https_proxy",
     "http_proxy",
 )
+
+
+def _secure_parent(path: Path) -> None:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if path.is_symlink() or path.resolve(strict=True) != path:
+        raise ValueError("deployment state parent must be canonical and non-symlink")
+    metadata = path.stat()
+    if metadata.st_uid != os.geteuid():
+        raise ValueError("deployment state parent must be owned by the caller")
+    if stat.S_IMODE(metadata.st_mode) & (stat.S_IWGRP | stat.S_IWOTH):
+        raise ValueError("deployment state parent must not be group/world writable")
+
+
+def _load_public_proof(path: Path) -> tuple[dict[str, Any], str]:
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        raise ValueError("public proof must be an absolute regular non-symlink file")
+    if path.resolve(strict=True) != path:
+        raise ValueError("public proof path must be canonical")
+    _secure_parent(path.parent)
+    metadata = path.stat()
+    if metadata.st_uid != os.geteuid():
+        raise ValueError("public proof must be owned by the caller")
+    if stat.S_IMODE(metadata.st_mode) & (stat.S_IWGRP | stat.S_IWOTH):
+        raise ValueError("public proof must not be group/world writable")
+    raw = path.read_bytes()
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("public proof is not an object")
+    return payload, hashlib.sha256(raw).hexdigest()
+
+
+def _validate_target_binding(
+    *,
+    target_mode: str,
+    manifest_path: Path | None,
+    proof_path: Path,
+    target_tunnel: str,
+) -> dict[str, Any]:
+    proof, proof_sha256 = _load_public_proof(proof_path)
+    if (
+        proof.get("status") != "pass"
+        or proof.get("target_tunnel") != target_tunnel
+        or proof.get("target_mode") != target_mode
+    ):
+        raise ValueError("public proof does not cover the exact target tunnel")
+    identity: dict[str, str] = {}
+    manifest_sha256: str | None = None
+    if target_mode == "qualified-candidate":
+        if manifest_path is None:
+            raise ValueError("qualified candidate requires a release manifest")
+        manifest, manifest_sha256 = load_owned_file(manifest_path)
+        container = manifest.get("container")
+        if not isinstance(container, dict):
+            raise ValueError("target release manifest lacks container identity")
+        identity = validate(
+            manifest,
+            container_id=str(container.get("id", "")),
+            image_digest=str(container.get("image_digest", "")),
+            fork_commit=str(manifest.get("source_commit", "")),
+        )
+        if proof.get("release_manifest_sha256") != manifest_sha256:
+            raise ValueError("public proof does not cover the target release manifest")
+        for name, expected in identity.items():
+            if proof.get(name) != expected:
+                raise ValueError(f"public proof target identity mismatch: {name}")
+    elif target_mode == "recorded-rollback":
+        if (
+            manifest_path is not None
+            or proof.get("release_manifest_sha256") is not None
+        ):
+            raise ValueError(
+                "rollback proof must not claim a candidate release manifest"
+            )
+        if not isinstance(proof.get("endpoint"), str) or not isinstance(
+            proof.get("model"), str
+        ):
+            raise ValueError("rollback proof lacks the recorded service identity")
+        identity = {
+            "endpoint": proof["endpoint"],
+            "model": proof["model"],
+        }
+    else:
+        raise ValueError("unsupported target mode")
+    try:
+        verified_at = datetime.fromisoformat(str(proof.get("verified_at", "")))
+    except ValueError as exc:
+        raise ValueError("public proof has an invalid verification time") from exc
+    now = datetime.now(timezone.utc)
+    if (
+        verified_at.tzinfo is None
+        or not now - timedelta(minutes=15) <= verified_at <= now
+    ):
+        raise ValueError("public proof is stale or from the future")
+    return {
+        **identity,
+        "target_mode": target_mode,
+        "target_tunnel": target_tunnel,
+        "release_manifest_sha256": manifest_sha256,
+        "public_proof_sha256": proof_sha256,
+        "public_proof_verified_at": proof["verified_at"],
+    }
 
 
 def _read_secret(path: Path) -> str:
@@ -112,7 +216,7 @@ def _validate_record(
 def _reserve_receipt(path: Path, payload: dict[str, Any]) -> int:
     if not path.is_absolute() or path.exists():
         raise ValueError("receipt must be a new absolute path")
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _secure_parent(path.parent)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
     os.write(fd, encoded)
@@ -131,7 +235,7 @@ def _finish_receipt(fd: int, payload: dict[str, Any]) -> None:
 def _acquire_lock(path: Path) -> int:
     if not path.is_absolute() or path.is_symlink():
         raise ValueError("cutover lock must be an absolute non-symlink path")
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _secure_parent(path.parent)
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
         os.close(fd)
@@ -157,6 +261,12 @@ def main() -> int:
     parser.add_argument("--api-token-file", type=Path, required=True)
     parser.add_argument("--receipt", type=Path)
     parser.add_argument("--lock", type=Path)
+    parser.add_argument("--target-release-manifest", type=Path)
+    parser.add_argument("--target-public-proof", type=Path)
+    parser.add_argument(
+        "--target-mode",
+        choices=("qualified-candidate", "recorded-rollback"),
+    )
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
 
@@ -201,11 +311,21 @@ def main() -> int:
         or not args.target_tunnel
         or args.receipt is None
         or args.lock is None
+        or args.target_public_proof is None
+        or args.target_mode is None
     ):
-        parser.error("switch requires --apply, --target-tunnel, --receipt, and --lock")
+        parser.error(
+            "switch requires --apply, target tunnel/release/proof, receipt, and lock"
+        )
     target = _tunnel_cname(args.target_tunnel)
     if target == current:
         parser.error("current and target tunnels must differ")
+    target_binding = _validate_target_binding(
+        manifest_path=args.target_release_manifest,
+        proof_path=args.target_public_proof,
+        target_tunnel=args.target_tunnel,
+        target_mode=args.target_mode,
+    )
 
     pending = {
         "schema_version": 1,
@@ -217,6 +337,7 @@ def main() -> int:
         "from_tunnel": args.expected_current_tunnel,
         "to_tunnel": args.target_tunnel,
         "expected_modified_on": record.get("modified_on"),
+        "target_binding": target_binding,
     }
     lock_fd = _acquire_lock(args.lock)
     receipt_fd: int | None = None

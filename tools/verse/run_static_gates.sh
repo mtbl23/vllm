@@ -60,7 +60,8 @@ uvx --from ruff==0.15.12 ruff check "${PYTHON_FILES[@]}"
 uvx --from ruff==0.15.12 ruff format --check "${PYTHON_FILES[@]}"
 uv run --no-project --with dockerfile-parse==2.0.1 python tools/generate_versions_json.py --check
 
-uv run --no-project --with pytest==9.1.0 python -m pytest -q \
+uv run --no-project --with pytest==9.1.0 --with fastapi==0.135.1 \
+  --with httpx==0.28.1 python -m pytest -q \
   --confcutdir=tests/tools \
   tests/tools/test_verse_sm120_profile.py \
   tests/tools/test_verse_sm120_release.py \
@@ -68,6 +69,7 @@ uv run --no-project --with pytest==9.1.0 python -m pytest -q \
   tests/tools/test_verse_sm120_model.py \
   tests/tools/test_verse_sm120_container.py \
   tests/tools/test_verse_sm120_cutover.py \
+  tests/tools/test_verse_sm120_auth.py \
   tests/tools/test_verse_sm120_acceptance.py \
   tests/tools/test_verse_sm120_chat_contract.py \
   tests/tools/test_verse_sm120_churn.py
@@ -93,9 +95,12 @@ grep -Fxq 'nvidia-cutlass-dsl[cu13]==4.6.2' requirements/cuda.txt
 grep -Fq 'quack-kernels==0.6.4' requirements/cuda.txt
 grep -Fq -- '-r /opt/verse/requirements/verse-sm120-flashinfer.lock' \
   docker/Dockerfile
-grep -Fq "'nvidia-cutlass-dsl[cu13]==4.7.0'" docker/Dockerfile
-grep -Fq 'nvidia-cudnn-frontend==1.27.0' docker/Dockerfile
-grep -Fq 'nvidia-nccl-cu13==2.29.7' docker/Dockerfile
+grep -Fq 'requirements/verse-sm120-runtime.lock' docker/Dockerfile
+grep -Fq 'uv pip install --system --no-deps --require-hashes' docker/Dockerfile
+grep -Fq 'nvidia-cutlass-dsl[cu13]==4.7.0' requirements/verse-sm120-runtime.lock
+grep -Fq 'nvidia-cudnn-frontend==1.27.0' requirements/verse-sm120-runtime.lock
+grep -Fq 'nvidia-nccl-cu13==2.29.7' requirements/verse-sm120-runtime.lock
+grep -Fq 'pytest==9.1.0' requirements/verse-sm120-runtime.lock
 grep -Fq 'ENV UV_OVERRIDE=/etc/uv-overrides-verse-sm120.txt' docker/Dockerfile
 grep -Fq 'deep_ep' docker/Dockerfile
 grep -Fq '        b12x \' docker/Dockerfile

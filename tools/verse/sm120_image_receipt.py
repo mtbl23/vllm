@@ -86,7 +86,7 @@ def validate_receipt_shape(receipt: dict) -> None:
     expected = {
         "schema_version",
         "status",
-        "approved_at",
+        "verified_at",
         "image_digest",
         "fork_commit",
         "runtime_profile",
@@ -96,8 +96,8 @@ def validate_receipt_shape(receipt: dict) -> None:
     }
     if set(receipt) != expected or receipt.get("schema_version") != 1:
         raise ValueError("image receipt schema is invalid")
-    if receipt.get("status") != "approved":
-        raise ValueError("image receipt is not approved")
+    if receipt.get("status") != "identity-verified":
+        raise ValueError("image identity receipt did not verify")
     if IMAGE_RE.fullmatch(str(receipt.get("image_digest", ""))) is None:
         raise ValueError("image receipt digest is invalid")
     if HEX40_RE.fullmatch(str(receipt.get("fork_commit", ""))) is None:
@@ -137,8 +137,8 @@ def create_receipt(args: argparse.Namespace) -> None:
         raise ValueError("image verification did not pass")
     receipt = {
         "schema_version": 1,
-        "status": "approved",
-        "approved_at": datetime.now(timezone.utc).isoformat(),
+        "status": "identity-verified",
+        "verified_at": datetime.now(timezone.utc).isoformat(),
         "image_digest": args.image,
         "fork_commit": args.fork_commit,
         "runtime_profile": args.runtime_profile,

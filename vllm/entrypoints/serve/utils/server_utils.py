@@ -25,6 +25,7 @@ logger = init_logger("vllm.entrypoints.openai.server_utils")
 
 
 GUARDED_PREFIX = ("/v1", "/v2", "/inference", "/cohere")
+VERSE_UNGUARDED_PATHS = frozenset({"/health", "/metrics"})
 
 
 class AuthenticationMiddleware:
@@ -71,8 +72,19 @@ class AuthenticationMiddleware:
         root_path = scope.get("root_path", "")
         url_path = scope["path"].removeprefix(root_path)
         headers = Headers(scope=scope)
+        # The upstream API-key contract intentionally protects only OpenAI-like
+        # route prefixes. Verse's appliance is a narrower boundary: when its
+        # fail-closed runtime profile is active, every application route except
+        # the exact liveness and Prometheus endpoints requires the bearer key.
+        # This covers /tokenize and /invocations and prevents a sibling process
+        # from bypassing the allowlisted public gateway through the raw socket.
+        requires_authentication = (
+            url_path not in VERSE_UNGUARDED_PATHS
+            if envs.VLLM_VERSE_RUNTIME_STRICT
+            else url_path.startswith(GUARDED_PREFIX)
+        )
         # Type narrow to satisfy mypy.
-        if url_path.startswith(GUARDED_PREFIX) and not self.verify_token(headers):
+        if requires_authentication and not self.verify_token(headers):
             response = JSONResponse(content={"error": "Unauthorized"}, status_code=401)
             return response(scope, receive, send)
         return self.app(scope, receive, send)
