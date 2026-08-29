@@ -128,6 +128,11 @@ def verify_vllm_binary_identity(
         and native_sha256 == native["sha256"],
         "loaded vLLM native extension does not match the declared wheel artifact",
     )
+    bundled_flash_attn = sorted((vllm_root / "vllm_flash_attn").glob("_vllm_fa*_C*.so"))
+    require(
+        not bundled_flash_attn,
+        "Verse SM120 appliance must not ship bundled vllm-flash-attn extensions",
+    )
     return {
         "native_extension": {
             "path": str(native_path),

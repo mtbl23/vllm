@@ -1579,6 +1579,11 @@ if (VLLM_GPU_LANG STREQUAL "CUDA")
     include(cmake/external_projects/qutlass.cmake)
     include(cmake/external_projects/tml_fa4.cmake)
 
-    # vllm-flash-attn should be last as it overwrites some CMake functions
-    include(cmake/external_projects/vllm_flash_attn.cmake)
+    # The fixed Verse SM120 appliance routes Gemma 4 attention through the
+    # pinned FlashInfer FA2 package. Do not compile or ship the separate
+    # vllm-flash-attn FA2/FA3 kernel matrix in that appliance wheel.
+    if (NOT "$ENV{VLLM_VERSE_SM120_WHEEL}" STREQUAL "1")
+        # vllm-flash-attn should be last as it overwrites some CMake functions
+        include(cmake/external_projects/vllm_flash_attn.cmake)
+    endif()
 endif ()

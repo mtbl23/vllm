@@ -46,6 +46,9 @@
     "TORCH_CUDA_ARCH_LIST": {
       "default": "7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0"
     },
+    "VLLM_VERSE_SM120_WHEEL": {
+      "default": "0"
+    },
     "MAX_JOBS": {
       "default": "2"
     },
@@ -63,9 +66,6 @@
     },
     "GIT_REPO_MOUNT_SOURCE": {
       "default": ".git"
-    },
-    "VLLM_VERSE_SM120_WHEEL": {
-      "default": "0"
     },
     "VLLM_MAX_SIZE_MB": {
       "default": "500"

@@ -476,6 +476,40 @@ def test_image_verifier_records_exact_native_and_wheel_identity(
     }
 
 
+def test_image_verifier_rejects_bundled_vllm_flash_attn_extension(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, image_verifier
+):
+    vllm_root = tmp_path / "site-packages" / "vllm"
+    native = vllm_root / "_C_stable_libtorch.abi3.so"
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"exact-native-extension")
+    bundled = vllm_root / "vllm_flash_attn" / "_vllm_fa2_C.abi3.so"
+    bundled.parent.mkdir()
+    bundled.write_bytes(b"unnecessary-bundled-extension")
+    wheel_manifest = tmp_path / "vllm-wheel.json"
+    wheel_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "wheel": {"filename": "vllm-test.whl", "sha256": "a" * 64},
+                "native_extension": {
+                    "member": "vllm/_C_stable_libtorch.abi3.so",
+                    "bytes": native.stat().st_size,
+                    "sha256": hashlib.sha256(native.read_bytes()).hexdigest(),
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(
+        image_verifier.importlib.util,
+        "find_spec",
+        lambda _name: SimpleNamespace(origin=str(native)),
+    )
+
+    with pytest.raises(SystemExit, match="must not ship bundled"):
+        image_verifier.verify_vllm_binary_identity(vllm_root, wheel_manifest)
+
+
 def test_wheel_identity_binds_native_extension_bytes(tmp_path: Path, wheel_identity):
     wheel = tmp_path / "vllm-test.whl"
     native = b"exact-native-extension"

@@ -113,6 +113,17 @@ grep -Fq 'ENV UV_OVERRIDE=/etc/uv-overrides-verse-sm120.txt' docker/Dockerfile
 grep -Fq 'deep_ep' docker/Dockerfile
 grep -Fq '        b12x \' docker/Dockerfile
 grep -Fq 'VLLM_VERSE_SM120_WHEEL=1' tools/verse/build_sm120_image.sh
+[[ $(grep -Fc 'ARG VLLM_VERSE_SM120_WHEEL=0' docker/Dockerfile) -eq 2 ]]
+grep -Fq \
+  'build_vllm_flash_attn = os.getenv("VLLM_VERSE_SM120_WHEEL") != "1"' \
+  setup.py
+grep -Fq 'if (NOT "$ENV{VLLM_VERSE_SM120_WHEEL}" STREQUAL "1")' CMakeLists.txt
+grep -Fq '_CUDA_FLASH_ATTN_AVAILABLE = False' \
+  vllm/v1/attention/backends/fa_utils.py
+grep -Fq 'Use the configured FlashInfer attention backend.' \
+  vllm/v1/attention/backends/fa_utils.py
+grep -Fq 'must not ship bundled vllm-flash-attn extensions' \
+  tools/verse/verify_sm120_image.py
 grep -Fq 'flashinfer-python @ https://github.com/flashinfer-ai/flashinfer/releases/download/nightly-v0.6.18-20260819/' \
   requirements/verse-sm120-wheel.txt
 grep -Fq 'uv pip uninstall --system' docker/Dockerfile

@@ -334,6 +334,7 @@ def test_dockerfile_preserves_upstream_git_builds_and_archive_builds():
     assert "source=.git,target=.git" not in dockerfile
     assert "ENV VLLM_VERSION_OVERRIDE=${VLLM_VERSION_OVERRIDE}" in dockerfile
     assert "VLLM_VERSE_SM120_WHEEL=${VLLM_VERSE_SM120_WHEEL}" in dockerfile
+    assert dockerfile.count("ARG VLLM_VERSE_SM120_WHEEL=0") == 2
     assert "ENV UV_OVERRIDE=/etc/uv-overrides-verse-sm120.txt" in dockerfile
     assert "requirements/verse-sm120-runtime.lock" in dockerfile
     assert "--no-deps --require-hashes" in dockerfile
@@ -348,6 +349,7 @@ def test_setup_metadata_has_an_explicit_verse_runtime_dependency_contract():
     ).read_text()
 
     assert 'os.getenv("VLLM_VERSE_SM120_WHEEL") == "1"' in setup
+    assert 'build_vllm_flash_attn = os.getenv("VLLM_VERSE_SM120_WHEEL") != "1"' in setup
     for package in (
         "flashinfer-python",
         "nvidia-cutlass-dsl",
@@ -360,3 +362,18 @@ def test_setup_metadata_has_an_explicit_verse_runtime_dependency_contract():
     ).read_text()
     assert "verify_vllm_wheel_requirements" in verifier
     assert 'not distributions.get("b12x")' in verifier
+    assert "must not ship bundled vllm-flash-attn extensions" in verifier
+
+
+def test_verse_wheel_omits_the_unused_bundled_flash_attention_matrix():
+    root = SOURCE.parents[2]
+    cmake = (root / "CMakeLists.txt").read_text()
+    fa_utils = (
+        root / "vllm" / "v1" / "attention" / "backends" / "fa_utils.py"
+    ).read_text()
+
+    assert 'if (NOT "$ENV{VLLM_VERSE_SM120_WHEEL}" STREQUAL "1")' in cmake
+    assert "include(cmake/external_projects/vllm_flash_attn.cmake)" in cmake
+    assert "_CUDA_FLASH_ATTN_AVAILABLE = False" in fa_utils
+    assert "CUDA FlashAttention is unavailable in this vLLM build" in fa_utils
+    assert "return _CUDA_FLASH_ATTN_AVAILABLE" in fa_utils

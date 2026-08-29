@@ -1385,17 +1385,23 @@ if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
 
 if _is_cuda():
-    ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
-    if USE_PRECOMPILED_EXTENSIONS or (
-        CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
+    build_vllm_flash_attn = os.getenv("VLLM_VERSE_SM120_WHEEL") != "1"
+    if build_vllm_flash_attn:
+        ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
+    if build_vllm_flash_attn and (
+        USE_PRECOMPILED_EXTENSIONS
+        or (CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3"))
     ):
         # FA3 requires CUDA 12.3 or later
         ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
-    # FA4 CuteDSL - Python-only component for FA4's cute DSL support
-    # Optional since this doesn't produce a .so file, just copies Python files
-    ext_modules.append(
-        CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa4_cutedsl_C", optional=True)
-    )
+    if build_vllm_flash_attn:
+        # FA4 CuteDSL - Python-only component for FA4's cute DSL support
+        # Optional since this doesn't produce a .so file, just copies Python files
+        ext_modules.append(
+            CMakeExtension(
+                name="vllm.vllm_flash_attn._vllm_fa4_cutedsl_C", optional=True
+            )
+        )
     if USE_PRECOMPILED_EXTENSIONS or (
         CUDA_HOME and get_nvcc_cuda_version() >= Version("12.9")
     ):
