@@ -1,0 +1,10 @@
+flowchart LR
+    I1[Salad IMDS JWT] --> IB[Identity broker]
+    I2[Salad IMDS JWT] --> IB
+    IB -->|temporary route credential| T1[Worker 1 tunnel]
+    IB -->|temporary route credential| T2[Worker 2 tunnel]
+    B[Verse backend] --> CF[Cloudflare routing]
+    CF --> T1
+    CF --> T2
+    T1 --> V1[vLLM loopback]
+    T2 --> V2[vLLM loopback]

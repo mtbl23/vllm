@@ -1,0 +1,100 @@
+{
+	admin off
+	auto_https off
+	log {
+		output discard
+	}
+}
+
+http://{$VERSE_GATEWAY_BIND:127.0.0.1:8080} {
+	bind 127.0.0.1
+
+	request_body {
+		max_size 4MB
+	}
+
+	@gpu0_get {
+		method GET HEAD
+		path /health /v1/models
+		header X-Verse-Worker gpu0
+		header X-Verse-Gateway-Token {$VERSE_GATEWAY_TOKEN}
+	}
+	@gpu1_get {
+		method GET HEAD
+		path /health /v1/models
+		header X-Verse-Worker gpu1
+		header X-Verse-Gateway-Token {$VERSE_GATEWAY_TOKEN}
+	}
+	@gpu0_post {
+		method POST
+		path /tokenize /v1/chat/completions
+		header X-Verse-Worker gpu0
+		header X-Verse-Gateway-Token {$VERSE_GATEWAY_TOKEN}
+	}
+	@gpu1_post {
+		method POST
+		path /tokenize /v1/chat/completions
+		header X-Verse-Worker gpu1
+		header X-Verse-Gateway-Token {$VERSE_GATEWAY_TOKEN}
+	}
+
+	handle @gpu0_get {
+		reverse_proxy {$VERSE_GPU0_ORIGIN:127.0.0.1:18001} {
+			header_up Authorization "Bearer {$VERSE_GPU0_API_KEY}"
+			header_up -CF-Access-Client-Id
+			header_up -CF-Access-Client-Secret
+			header_up -Cf-Access-Jwt-Assertion
+			header_up -Cookie
+			header_up -Proxy-Authorization
+			header_up -X-Verse-Worker
+			header_up -X-Verse-Gateway-Token
+			header_down -Server
+			flush_interval -1
+		}
+	}
+	handle @gpu0_post {
+		reverse_proxy {$VERSE_GPU0_ORIGIN:127.0.0.1:18001} {
+			header_up Authorization "Bearer {$VERSE_GPU0_API_KEY}"
+			header_up -CF-Access-Client-Id
+			header_up -CF-Access-Client-Secret
+			header_up -Cf-Access-Jwt-Assertion
+			header_up -Cookie
+			header_up -Proxy-Authorization
+			header_up -X-Verse-Worker
+			header_up -X-Verse-Gateway-Token
+			header_down -Server
+			flush_interval -1
+		}
+	}
+	
+	handle @gpu1_get {
+		reverse_proxy {$VERSE_GPU1_ORIGIN:127.0.0.1:18002} {
+			header_up Authorization "Bearer {$VERSE_GPU1_API_KEY}"
+			header_up -CF-Access-Client-Id
+			header_up -CF-Access-Client-Secret
+			header_up -Cf-Access-Jwt-Assertion
+			header_up -Cookie
+			header_up -Proxy-Authorization
+			header_up -X-Verse-Worker
+			header_up -X-Verse-Gateway-Token
+			header_down -Server
+			flush_interval -1
+		}
+	}
+	handle @gpu1_post {
+		reverse_proxy {$VERSE_GPU1_ORIGIN:127.0.0.1:18002} {
+			header_up Authorization "Bearer {$VERSE_GPU1_API_KEY}"
+			header_up -CF-Access-Client-Id
+			header_up -CF-Access-Client-Secret
+			header_up -Cf-Access-Jwt-Assertion
+			header_up -Cookie
+			header_up -Proxy-Authorization
+			header_up -X-Verse-Worker
+			header_up -X-Verse-Gateway-Token
+			header_down -Server
+			flush_interval -1
+		}
+	}
+
+	respond 404
+}

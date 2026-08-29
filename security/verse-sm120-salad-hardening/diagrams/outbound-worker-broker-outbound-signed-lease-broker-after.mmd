@@ -1,0 +1,13 @@
+flowchart LR
+    U[Verse Free requests] --> B[Verse-owned lease broker]
+    I1[Salad IMDS 5-minute JWT] --> W1[Worker 1 sidecar]
+    I2[Salad IMDS 5-minute JWT] --> W2[Worker 2 sidecar]
+    W1 -->|outbound authenticated stream| B
+    W2 -->|outbound authenticated stream| B
+    B -->|signed bounded request lease| W1
+    B -->|signed bounded request lease| W2
+    W1 --> V1[vLLM loopback]
+    W2 --> V2[vLLM loopback]
+    B --> Q[38-slot admission, queue, affinity, failover]
+    S[Salad replacement] -->|new instance identity| W3[Replacement warming]
+    W3 -->|outbound auth plus warmup proof| B

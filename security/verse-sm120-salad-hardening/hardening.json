@@ -1,0 +1,169 @@
+{
+  "documentType": "codex-security.hardening-analysis",
+  "schemaVersion": "1.0",
+  "analysisId": "hardening_20260828_verse_sm120_salad",
+  "sourceEvidence": {
+    "kind": "mixed_source_and_document_collection",
+    "label": "Verse SM120 runtime and SaladCloud worker identity evidence",
+    "collectionSha256": "4ce00c3db75f8a76e4a9eb84e6bde83726cdf6115f7604f20227df2df43c7bba",
+    "artifactCount": 11,
+    "sourceDrift": "none",
+    "targetRevision": "30aac553edceddcaeec8a028b2a56be3ddf2a1c2"
+  },
+  "assessment": {
+    "outcome": "opportunities_identified",
+    "summary": "Move Salad workers behind a Verse-owned outbound broker using short-lived Salad workload identity and signed request leases."
+  },
+  "constraints": {
+    "profile": "balanced",
+    "changeHorizons": ["incremental", "medium_term", "foundational"],
+    "nonNegotiables": [
+      "No public raw vLLM endpoint",
+      "No permanent Verse, Cloudflare, Hugging Face, database, or provider-management credential on a worker",
+      "No prompts, outputs, personas, or character cards in logs",
+      "No more than 38 active requests admitted to one RTX 5070 Ti",
+      "Production is unchanged until qualification and explicit cutover"
+    ],
+    "assumptions": [
+      "Salad workload JWT validation remains available and includes the documented provider claims.",
+      "The initial cohort is two logical RTX 5070 Ti workers.",
+      "Salad normally replaces a lost worker within 10 minutes and at worst approximately 20 minutes.",
+      "The consumer-owned host is not a confidential boundary."
+    ]
+  },
+  "opportunities": [
+    {
+      "opportunityId": "outbound-worker-broker",
+      "title": "Move inference workers behind an outbound lease broker",
+      "summary": "Centralize worker identity, admission, affinity, failover, and revocation in a Verse-owned broker while leaving vLLM reachable only inside each worker container.",
+      "diagnosis": "The current appliance is secure for an owned host but depends on host-local long-lived credentials and a per-host tunnel. Consumer-owned Salad nodes require an identity and routing boundary that assumes host compromise.",
+      "evidence": [
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "path": "tools/verse/run_sm120_server.sh",
+          "claim": "The runtime binds vLLM to localhost and mounts an owner-only API key file."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "source",
+          "path": "tools/verse/verse-sm120-gateway.Caddyfile",
+          "claim": "The local gateway allowlists four HTTP paths and discards access logs."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "document",
+          "evidenceId": "salad-workload-jwt",
+          "claim": "Salad documents a workload JWT obtained from local IMDS, expiring after five minutes and carrying organization, project, group, instance, and machine identity."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "document",
+          "evidenceId": "cloudflare-tunnel-token",
+          "claim": "Cloudflare documents that anyone possessing a remotely managed tunnel token can run that tunnel."
+        },
+        {
+          "claimType": "inferred",
+          "sourceKind": "threat_model",
+          "evidenceId": "consumer-host-boundary",
+          "claim": "A consumer-machine administrator can inspect inference plaintext and loaded weights despite container-level restrictions."
+        }
+      ],
+      "desiredInvariants": [
+        "Workers initiate every production connection outbound and expose no public inference or management port.",
+        "A worker is admitted only after the broker validates a fresh Salad JWT and exact production claims.",
+        "Workers receive bounded, expiring, single-request leases rather than reusable central credentials.",
+        "Every response is bound to the request ID, worker session, model digest, nonce, and lease expiry.",
+        "The broker owns the 38-slot admission limit, per-chat worker affinity, queueing, revocation, and failover.",
+        "A replacement worker receives no user request before deterministic warmup gates pass.",
+        "No observability path records raw request or generated content."
+      ],
+      "proposalPath": "proposals/outbound-worker-broker.md",
+      "options": [
+        {
+          "optionId": "existing-host-tunnels",
+          "title": "Reuse one Cloudflare tunnel per worker",
+          "kind": "baseline",
+          "summary": "Adapt the owned-host appliance with one tunnel and one credential set per Salad worker.",
+          "diagramPaths": {
+            "before": "diagrams/outbound-worker-broker-before.mmd",
+            "after": "diagrams/outbound-worker-broker-existing-host-tunnels-after.mmd"
+          },
+          "evidenceCoverage": [
+            {
+              "evidenceId": "cloudflare-tunnel-token",
+              "effect": "unaffected",
+              "tacticalFixRequired": true,
+              "rationale": "The host still receives a credential that can run a tunnel for its lifetime."
+            }
+          ],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "medium", "basis": "source-derived", "assessment": "Loopback binding and Access prevent open public vLLM exposure, but reusable tunnel and application credentials remain on an untrusted host.", "validationPlan": "Attempt credential reuse from a second node and verify revocation behavior."},
+            {"dimension": "performance", "direction": "neutral", "confidence": "medium", "basis": "analogous", "assessment": "The extra local gateway and Cloudflare hop should not change GPU decode throughput materially.", "validationPlan": "Measure streaming latency and aggregate decode through the full route."},
+            {"dimension": "memory", "direction": "neutral", "confidence": "high", "basis": "source-derived", "assessment": "Tunnel and gateway memory are small relative to model and KV memory.", "validationPlan": "Record container RSS during 38-request load."},
+            {"dimension": "reliability", "direction": "unknown", "confidence": "medium", "basis": "source-derived", "assessment": "Cloudflare replicas do not supply the per-chat affinity needed for predictable KV reuse, so failover and replacement remain awkward.", "validationPlan": "Run a two-worker replacement and affinity drill."},
+            {"dimension": "operability", "direction": "regresses", "confidence": "medium", "basis": "source-derived", "assessment": "Per-worker tunnel and secret rotation create more lifecycle state than the brokered design.", "validationPlan": "Document and time a two-worker rotation and emergency revocation."},
+            {"dimension": "migration", "direction": "improves", "confidence": "high", "basis": "source-derived", "assessment": "This option resembles the existing appliance and requires the least code change.", "validationPlan": "Qualify one disposable Salad worker through a non-production hostname."}
+          ],
+          "residualRisks": ["Host can steal active credentials.", "Host can inspect plaintext and model weights.", "Traffic affinity and failover remain split across control planes."],
+          "implementationReadiness": {"affectedComponents": ["tools/verse/run_sm120_gateway.sh", "tools/verse/SM120_CUTOVER_RUNBOOK.md"], "workPackages": ["Create per-worker tunnels and rotate credentials."], "acceptanceCriteria": ["No raw vLLM route is public."], "migrationNotes": ["Use a separate non-production hostname."], "rollback": "Route back to the existing Free service and revoke worker credentials."}
+        },
+        {
+          "optionId": "ephemeral-worker-tunnels",
+          "title": "Issue short-lived per-worker tunnel credentials",
+          "kind": "incremental",
+          "summary": "Use an identity broker to mint narrowly scoped temporary routing credentials while retaining inbound request delivery.",
+          "diagramPaths": {
+            "before": "diagrams/outbound-worker-broker-before.mmd",
+            "after": "diagrams/outbound-worker-broker-ephemeral-worker-tunnels-after.mmd"
+          },
+          "evidenceCoverage": [
+            {"evidenceId": "salad-workload-jwt", "effect": "mitigates", "tacticalFixRequired": true, "rationale": "Short-lived Salad identity can gate credential issuance, but the worker still receives a routing credential."}
+          ],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "medium", "basis": "source-derived", "assessment": "Credential theft has a shorter useful lifetime and can be tied to exact provider claims.", "validationPlan": "Verify expiry, replay rejection, and emergency revocation."},
+            {"dimension": "performance", "direction": "neutral", "confidence": "medium", "basis": "analogous", "assessment": "The request path remains an ordinary reverse proxy path.", "validationPlan": "Measure end-to-end streaming overhead."},
+            {"dimension": "memory", "direction": "neutral", "confidence": "high", "basis": "source-derived", "assessment": "Credential rotation does not affect GPU memory materially.", "validationPlan": "Record steady-state sidecar RSS."},
+            {"dimension": "reliability", "direction": "improves", "confidence": "low", "basis": "hypothetical", "assessment": "An identity broker can automate replacement, but inbound routing still needs affinity and health ownership.", "validationPlan": "Run a replacement drill with active streams."},
+            {"dimension": "operability", "direction": "regresses", "confidence": "medium", "basis": "source-derived", "assessment": "The design adds a broker without consolidating dispatch, leaving two control planes.", "validationPlan": "Exercise bootstrap, renewal, and revocation under outage."},
+            {"dimension": "migration", "direction": "improves", "confidence": "medium", "basis": "source-derived", "assessment": "The existing HTTP request flow remains mostly intact.", "validationPlan": "Canary one worker without changing the backend payload contract."}
+          ],
+          "residualRisks": ["Host can use credentials while valid.", "Host can inspect plaintext and model weights.", "Routing and admission can disagree."],
+          "implementationReadiness": {"affectedComponents": ["worker bootstrap", "identity broker", "Cloudflare route management"], "workPackages": ["Validate Salad JWT.", "Issue and revoke worker credentials."], "acceptanceCriteria": ["A stale or wrong-group Salad JWT cannot obtain routing credentials."], "migrationNotes": ["Introduce the broker before replacing existing routing."], "rollback": "Stop issuing credentials and route to the existing Free service."}
+        },
+        {
+          "optionId": "outbound-signed-lease-broker",
+          "title": "Use an outbound signed-lease broker",
+          "kind": "structural",
+          "summary": "Workers maintain outbound authenticated streams to one Verse-owned dispatcher that owns admission, affinity, leases, and failover.",
+          "diagramPaths": {
+            "before": "diagrams/outbound-worker-broker-before.mmd",
+            "after": "diagrams/outbound-worker-broker-outbound-signed-lease-broker-after.mmd"
+          },
+          "evidenceCoverage": [
+            {"evidenceId": "salad-workload-jwt", "effect": "addresses", "tacticalFixRequired": false, "rationale": "The broker validates native short-lived workload identity and need not distribute a reusable central secret."},
+            {"evidenceId": "cloudflare-tunnel-token", "effect": "addresses", "tacticalFixRequired": false, "rationale": "No Cloudflare tunnel token is placed on a Salad worker."},
+            {"evidenceId": "consumer-host-boundary", "effect": "unaffected", "tacticalFixRequired": false, "rationale": "A software broker cannot conceal inference plaintext or loaded weights from a malicious host administrator."}
+          ],
+          "tradeoffs": [
+            {"dimension": "security", "direction": "improves", "confidence": "high", "basis": "source-derived", "assessment": "The worker has no inbound service and no reusable central credential; compromise is bounded to active plaintext and short signed leases.", "validationPlan": "Test wrong-group identity, replay, expiry, lease tampering, response substitution, and revoked worker behavior."},
+            {"dimension": "performance", "direction": "unknown", "confidence": "medium", "basis": "hypothetical", "assessment": "One broker hop and framed streaming add CPU/network work but should not alter GPU kernel throughput; queue and affinity can reduce avoidable prefill.", "validationPlan": "Load test 76 active streams plus queued work and compare time-to-first-token and decode throughput."},
+            {"dimension": "memory", "direction": "neutral", "confidence": "medium", "basis": "source-derived", "assessment": "Bounded request framing and one worker sidecar are negligible beside model and KV allocation if buffering is prohibited.", "validationPlan": "Verify streaming backpressure and bound broker and worker RSS."},
+            {"dimension": "reliability", "direction": "improves", "confidence": "high", "basis": "source-derived", "assessment": "One dispatcher can enforce 38 slots, queue overload, preserve chat affinity, eject a failed worker, and gate a replacement through warmup.", "validationPlan": "Kill either worker under load and prove no over-admission, duplicate completion, or premature replacement traffic."},
+            {"dimension": "operability", "direction": "improves", "confidence": "medium", "basis": "source-derived", "assessment": "A single routing authority removes per-worker public endpoints and centralizes revocation and health state, but introduces one service that must itself be redundant.", "validationPlan": "Run broker failover and worker replacement drills with aggregate-only telemetry."},
+            {"dimension": "migration", "direction": "regresses", "confidence": "high", "basis": "source-derived", "assessment": "This option requires a new worker protocol and backend dispatch path before cutover.", "validationPlan": "Shadow synthetic requests through a non-production broker and retain the existing provider as rollback."}
+          ],
+          "residualRisks": ["Consumer host can inspect prompts, outputs, and loaded weights.", "Compromised worker can return bad output, delay, drop, or selectively corrupt requests.", "The broker becomes an availability and authorization boundary and must be deployed redundantly."],
+          "implementationReadiness": {"affectedComponents": ["Verse inference dispatcher", "Salad worker sidecar", "runtime image", "deployment and release gates"], "workPackages": ["Define the framed streaming protocol.", "Validate Salad JWT and exact claims.", "Implement nonce-bound request leases and response binding.", "Implement per-chat affinity and 38-slot admission.", "Implement two-worker health, failover, and warmup state machine.", "Add content-free telemetry and adversarial tests."], "acceptanceCriteria": ["Workers expose no inbound port.", "No permanent central credential exists in worker configuration or filesystem.", "A replayed, expired, wrong-project, wrong-group, or revoked identity is rejected.", "A failed worker cannot complete a lease after reassignment.", "One surviving worker never receives more than 38 active requests.", "A replacement receives production traffic only after exact model and runtime warmup gates pass.", "Logs contain no prompt or output content."], "migrationNotes": ["Deploy the broker beside the current path and shadow only synthetic requests first.", "Canary one Salad worker, then two, while retaining the current Free provider as rollback."], "rollback": "Stop worker lease issuance and restore the existing Free inference route; worker sessions expire without central credential rotation."}
+        }
+      ],
+      "recommendedOptionId": "outbound-signed-lease-broker",
+      "recommendation": "Use the outbound signed-lease broker for consumer-owned Salad nodes. Retain the current direct-tunnel appliance only for hosts Verse owns and trusts."
+    }
+  ],
+  "openQuestions": [
+    "Is consumer-host access to Free-model prompt plaintext an accepted residual risk?",
+    "Should the broker live in the existing backend process or a separate replicated service?",
+    "Which exact Salad organization, project, and container-group claims identify production workers?"
+  ]
+}

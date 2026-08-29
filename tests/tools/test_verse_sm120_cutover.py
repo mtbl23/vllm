@@ -10,6 +10,9 @@ import pytest
 
 ROOT = Path(__file__).parents[2]
 CADDYFILE = ROOT / "tools" / "verse" / "verse-sm120-gateway.Caddyfile"
+DUAL_CADDYFILE = ROOT / "tools" / "verse" / "verse-sm120-dual-gateway.Caddyfile"
+DUAL_LAUNCHER = ROOT / "tools" / "verse" / "run_sm120_dual_gateway.sh"
+DUAL_VERIFY = ROOT / "tools" / "verse" / "verify_sm120_dual_gateway.py"
 ROUTE_PATH = ROOT / "tools" / "verse" / "switch_sm120_cloudflare_route.py"
 PUBLIC_PATH = ROOT / "tools" / "verse" / "verify_sm120_public_gateway.py"
 
@@ -24,6 +27,7 @@ def _load(name: str, path: Path):
 
 route = _load("switch_sm120_cloudflare_route", ROUTE_PATH)
 public = _load("verify_sm120_public_gateway", PUBLIC_PATH)
+dual = _load("verify_sm120_dual_gateway", DUAL_VERIFY)
 
 
 def test_caddy_gateway_has_exact_allowlist_and_no_management_routes():
@@ -35,6 +39,54 @@ def test_caddy_gateway_has_exact_allowlist_and_no_management_routes():
     assert "respond 404" in text
     assert "127.0.0.1:8000" in text
     assert "0.0.0.0" not in text
+
+
+def test_dual_gateway_is_loopback_sticky_and_fail_closed():
+    text = DUAL_CADDYFILE.read_text()
+
+    assert "bind 127.0.0.1" in text
+    assert "{$VERSE_GATEWAY_BIND:127.0.0.1:8080}" in text
+    assert "{$VERSE_GPU0_ORIGIN:127.0.0.1:18001}" in text
+    assert "{$VERSE_GPU1_ORIGIN:127.0.0.1:18002}" in text
+    assert text.count("header X-Verse-Worker gpu0") == 2
+    assert text.count("header X-Verse-Worker gpu1") == 2
+    assert text.count("header X-Verse-Gateway-Token {$VERSE_GATEWAY_TOKEN}") == 4
+    assert text.count('header_up Authorization "Bearer {$VERSE_GPU0_API_KEY}"') == 2
+    assert text.count('header_up Authorization "Bearer {$VERSE_GPU1_API_KEY}"') == 2
+    for sensitive_header in (
+        "CF-Access-Client-Id",
+        "CF-Access-Client-Secret",
+        "Cf-Access-Jwt-Assertion",
+        "Cookie",
+        "Proxy-Authorization",
+        "X-Verse-Worker",
+        "X-Verse-Gateway-Token",
+    ):
+        assert text.count(f"header_up -{sensitive_header}") == 4
+    for path in dual.FORBIDDEN_PATHS:
+        if path != "/":
+            assert f"path {path}" not in text
+    assert "respond 404" in text
+    assert "0.0.0.0" not in text
+
+
+def test_dual_gateway_launcher_pins_binary_and_drops_privileges():
+    text = DUAL_LAUNCHER.read_text()
+
+    assert "VERSE_CADDY_SHA256" in text
+    assert 'sha256sum "$VERSE_CADDY_BINARY"' in text
+    assert "gateway bind port is already listening" in text
+    assert "dual workers must use distinct API keys" in text
+    assert "VERSE_GATEWAY_TOKEN_FILE" in text
+    assert "gateway credential must be distinct from worker API keys" in text
+    assert "gateway key file owner does not match its pinned UID" in text
+    assert "VERSE_GPU0_KEY_UID" in text
+    assert "VERSE_GPU1_KEY_UID" in text
+    assert "gateway UID must be distinct from worker key owners" in text
+    assert "ulimit -c 0" in text
+    assert "/usr/bin/setpriv" in text
+    assert "--no-new-privs" in text
+    assert "--clear-groups" in text
 
 
 def test_cloudflare_route_accepts_only_exact_proxied_record():

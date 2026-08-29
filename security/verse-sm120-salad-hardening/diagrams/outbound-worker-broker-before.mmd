@@ -1,0 +1,11 @@
+flowchart LR
+    B[Verse backend] -->|request plus reusable credentials| CF[Cloudflare routing]
+    CF -->|inbound request| W1[Salad worker 1]
+    CF -->|inbound request| W2[Salad worker 2]
+    W1 --> G1[Local Caddy gateway]
+    W2 --> G2[Local Caddy gateway]
+    G1 --> V1[vLLM loopback]
+    G2 --> V2[vLLM loopback]
+    H1[Consumer host admin] -. can inspect credentials and plaintext .-> W1
+    H2[Consumer host admin] -. can inspect credentials and plaintext .-> W2
+    S[Salad replacement] -. replaces physical nodes .-> W1

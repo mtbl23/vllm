@@ -1,0 +1,10 @@
+flowchart LR
+    B[Verse backend] --> CF[Cloudflare Access and routing]
+    CF --> T1[Worker 1 tunnel]
+    CF --> T2[Worker 2 tunnel]
+    T1 --> G1[Allowlisting gateway]
+    T2 --> G2[Allowlisting gateway]
+    G1 --> V1[vLLM loopback]
+    G2 --> V2[vLLM loopback]
+    C1[Reusable tunnel and API credentials] --> T1
+    C2[Reusable tunnel and API credentials] --> T2
