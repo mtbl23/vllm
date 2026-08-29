@@ -853,7 +853,9 @@ def test_release_wrappers_anchor_exact_container_and_gpu_ids():
     assert "((B12X_COUNT == 6))" in cuda_runner
     assert "VERSE_B12X_ORACLE_PASSED" in cuda_runner
     assert "tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py" in (cuda_runner)
-    assert "COPY tests/kernels/attention/test_cache.py" in dockerfile
+    assert (
+        "COPY tests/kernels/attention/test_verse_sm120_nvfp4_kv_cache.py" in dockerfile
+    )
     assert (
         "COPY tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py" in dockerfile
     )

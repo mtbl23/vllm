@@ -212,12 +212,12 @@ docker run --rm \
     echo VERSE_GPU_ORACLE_PASSED
 
     python -m pytest --collect-only -q -p no:cacheprovider \
-      tests/kernels/attention/test_cache.py::test_reshape_and_cache_nvfp4_physical_hnd_shape | tee "$KV_COLLECT"
+      tests/kernels/attention/test_verse_sm120_nvfp4_kv_cache.py::test_verse_sm120_nvfp4_physical_hnd_roundtrip | tee "$KV_COLLECT"
     KV_COUNT=$(grep -Ec "^tests/.+::" "$KV_COLLECT")
     ((KV_COUNT == 2))
     ! grep -Eqi "skipped|deselected|xfailed|xpassed|warning|error" "$KV_COLLECT"
     python -m pytest -q -p no:cacheprovider --maxfail=1 \
-      tests/kernels/attention/test_cache.py::test_reshape_and_cache_nvfp4_physical_hnd_shape | tee "$KV_OUTPUT"
+      tests/kernels/attention/test_verse_sm120_nvfp4_kv_cache.py::test_verse_sm120_nvfp4_physical_hnd_roundtrip | tee "$KV_OUTPUT"
     grep -Eq "^${KV_COUNT} passed in [0-9.]+s$" "$KV_OUTPUT"
     ! grep -Eqi "skipped|deselected|xfailed|xpassed|warning|error" "$KV_OUTPUT"
     sed -n "s#^\(tests/.*::.*\)$#VERSE_CUDA_TEST_RESULT=passed kv_store_oracle \1#p" \

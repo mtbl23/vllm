@@ -1131,8 +1131,8 @@ COPY tests/__init__.py /opt/verse-tests/tests/__init__.py
 COPY tests/kernels/__init__.py /opt/verse-tests/tests/kernels/__init__.py
 COPY tests/kernels/attention/test_flashinfer.py \
     /opt/verse-tests/tests/kernels/attention/test_flashinfer.py
-COPY tests/kernels/attention/test_cache.py \
-    /opt/verse-tests/tests/kernels/attention/test_cache.py
+COPY tests/kernels/attention/test_verse_sm120_nvfp4_kv_cache.py \
+    /opt/verse-tests/tests/kernels/attention/test_verse_sm120_nvfp4_kv_cache.py
 COPY tests/kernels/quantization/nvfp4_utils.py \
     /opt/verse-tests/tests/kernels/quantization/nvfp4_utils.py
 COPY tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py \

@@ -307,6 +307,19 @@ def test_semantic_text_evidence_rejects_multiscript_token_soup():
         MODULE.semantic_text_evidence(content, 1103)
 
 
+def test_semantic_text_evidence_rejects_repetitive_ascii_word_salad():
+    content = (
+        "the rain and you were in tower but I returned with lantern from pass "
+        "through night. the rain and you were in tower but I returned with "
+        "lantern from pass through night. the rain and you were in tower but I "
+        "returned with lantern from pass through night. the rain and you were "
+        "in tower but I returned with lantern from pass through night."
+    )
+
+    with pytest.raises(ValueError, match="repetitive"):
+        MODULE.semantic_text_evidence(content, 1103)
+
+
 def test_capacity_probe_overlaps_all_requests_and_observes_running(monkeypatch):
     concurrency = 4
     active = 0

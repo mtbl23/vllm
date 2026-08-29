@@ -468,11 +468,16 @@ def semantic_text_evidence(content: str, seed: int) -> dict[str, Any]:
         for character in content
     )
     words = re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", content.lower())
+    bigrams = list(zip(words, words[1:]))
+    trigrams = list(zip(words, words[1:], words[2:]))
     common_word_count = sum(word in SEMANTIC_COMMON_WORDS for word in words)
     printable_fraction = printable_count / character_count
     ascii_fraction = ascii_count / character_count
     alphabetic_fraction = alpha_count / character_count
     common_word_fraction = common_word_count / max(1, len(words))
+    unique_bigram_fraction = len(set(bigrams)) / max(1, len(bigrams))
+    unique_trigram_fraction = len(set(trigrams)) / max(1, len(trigrams))
+    sentence_mark_count = sum(content.count(mark) for mark in ".?!")
 
     require(
         printable_fraction >= 0.995,
@@ -500,6 +505,18 @@ def semantic_text_evidence(content: str, seed: int) -> dict[str, Any]:
         common_word_fraction >= 0.15,
         "semantic canary lacks ordinary English structure",
     )
+    require(
+        unique_bigram_fraction >= 0.55,
+        "semantic canary contains repetitive English word salad",
+    )
+    require(
+        unique_trigram_fraction >= 0.65,
+        "semantic canary contains repetitive phrase corruption",
+    )
+    require(
+        sentence_mark_count >= 2,
+        "semantic canary lacks sentence structure",
+    )
     return {
         "seed": seed,
         "content_sha256": hashlib.sha256(content.encode()).hexdigest(),
@@ -510,6 +527,9 @@ def semantic_text_evidence(content: str, seed: int) -> dict[str, Any]:
         "ascii_fraction": ascii_fraction,
         "alphabetic_fraction": alphabetic_fraction,
         "common_word_fraction": common_word_fraction,
+        "unique_bigram_fraction": unique_bigram_fraction,
+        "unique_trigram_fraction": unique_trigram_fraction,
+        "sentence_mark_count": sentence_mark_count,
         "replacement_character_count": replacement_count,
         "non_latin_letter_count": non_latin_letter_count,
     }
