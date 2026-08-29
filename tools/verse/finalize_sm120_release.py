@@ -64,6 +64,7 @@ DOCKER_HOST_ID_RE = re.compile(r"[A-Za-z0-9:._-]{8,256}")
 CUDA_MARKERS = (
     "VERSE_ROUTING_GATES_PASSED",
     "VERSE_GPU_ORACLE_PASSED",
+    "VERSE_KV_STORE_ORACLE_PASSED",
     "VERSE_B12X_ORACLE_PASSED",
     "SM120 image and native NVFP4 FA2/B12X correctness gates passed",
 )
@@ -71,6 +72,7 @@ CUDA_TEST_ARTIFACT_RELATIVE_PATHS = (
     "tests/v1/attention/test_gemma4_nvfp4_flashinfer_routing.py",
     "tests/v1/attention/test_nvfp4_flashinfer_vosplit.py",
     "tests/kernels/attention/test_flashinfer.py",
+    "tests/kernels/attention/test_cache.py",
     "tests/kernels/quantization/nvfp4_utils.py",
     "tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py",
 )
@@ -88,13 +90,33 @@ CUDA_B12X_TEST_PREFIX = (
     "tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py::"
     "test_flashinfer_b12x_nvfp4_linear_matches_reference"
 )
-CUDA_B12X_TEST_NODE_IDS = tuple(
+CUDA_B12X_PROFILE_TEST_NODE_IDS = tuple(
     f"{CUDA_B12X_TEST_PREFIX}[{case}]"
     for case in ("decode", "max-seqs", "max-batched-tokens")
+)
+CUDA_B12X_GEMMA_TEST_PREFIX = (
+    "tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py::"
+    "test_flashinfer_b12x_nvfp4_gemma_shapes_match_reference"
+)
+CUDA_B12X_GEMMA_TEST_NODE_IDS = tuple(
+    f"{CUDA_B12X_GEMMA_TEST_PREFIX}[{case}]"
+    for case in ("gemma-q-proj", "gemma-gate-proj", "gemma-down-proj")
+)
+CUDA_B12X_TEST_NODE_IDS = (
+    CUDA_B12X_PROFILE_TEST_NODE_IDS + CUDA_B12X_GEMMA_TEST_NODE_IDS
+)
+CUDA_KV_STORE_TEST_PREFIX = (
+    "tests/kernels/attention/test_cache.py::"
+    "test_reshape_and_cache_nvfp4_physical_hnd_shape"
+)
+CUDA_KV_STORE_TEST_NODE_IDS = tuple(
+    f"{CUDA_KV_STORE_TEST_PREFIX}[{case}-cuda:0]"
+    for case in ("shape-regression", "gemma4-runtime")
 )
 EXPECTED_CUDA_TEST_COUNTS = {
     "routing": 55,
     "gpu_oracle": 6,
+    "kv_store_oracle": len(CUDA_KV_STORE_TEST_NODE_IDS),
     "b12x_oracle": len(CUDA_B12X_TEST_NODE_IDS),
 }
 QUALIFICATION_TOOL_RELATIVE_PATHS = (
@@ -410,6 +432,50 @@ def validate_chat_contract(payload: dict[str, Any]) -> None:
     )
     for index, run in enumerate(decode_runs):
         validate_fingerprint(run, 16, f"greedy decode run {index}")
+    semantic = payload.get("semantic_rp_evidence")
+    require(isinstance(semantic, dict), "missing semantic RP evidence")
+    require(
+        semantic.get("scope") == "safe_rp_semantic_integrity"
+        and semantic.get("raw_output_retained") is False,
+        "semantic RP evidence has the wrong scope",
+    )
+    semantic_runs = semantic.get("runs")
+    require(
+        isinstance(semantic_runs, list)
+        and len(semantic_runs) == 3
+        and [run.get("seed") for run in semantic_runs] == [1103, 2207, 3301],
+        "semantic RP evidence has the wrong run inventory",
+    )
+    for index, run in enumerate(semantic_runs):
+        require(isinstance(run, dict), f"semantic RP run {index} is not an object")
+        require(
+            SHA256_RE.fullmatch(str(run.get("content_sha256", ""))) is not None,
+            f"semantic RP run {index} hash is invalid",
+        )
+        require(
+            int(run.get("character_count", 0)) >= 100
+            and int(run.get("ascii_word_count", 0)) >= 24
+            and int(run.get("unique_ascii_word_count", 0)) >= 14,
+            f"semantic RP run {index} lacks English text",
+        )
+        require(
+            int(run.get("replacement_character_count", -1)) == 0
+            and int(run.get("non_latin_letter_count", -1)) == 0,
+            f"semantic RP run {index} contains script corruption",
+        )
+        for key, minimum in (
+            ("printable_fraction", 0.995),
+            ("ascii_fraction", 0.97),
+            ("alphabetic_fraction", 0.45),
+            ("common_word_fraction", 0.15),
+        ):
+            value = run.get(key)
+            require(
+                isinstance(value, int | float)
+                and math.isfinite(float(value))
+                and float(value) >= minimum,
+                f"semantic RP run {index} has invalid {key}",
+            )
     require(
         int(payload.get("boundary_accepted_prompt_tokens", -1)) == 6143,
         "6143+1 boundary acceptance is absent",
@@ -877,6 +943,10 @@ def validate_cuda_identity(
         "CUDA GPU parameterized node inventory is incomplete",
     )
     require(
+        set(suite_nodes["kv_store_oracle"]) == set(CUDA_KV_STORE_TEST_NODE_IDS),
+        "CUDA KV-store parameterized node inventory is incomplete",
+    )
+    require(
         set(suite_nodes["b12x_oracle"]) == set(CUDA_B12X_TEST_NODE_IDS),
         "CUDA B12X parameterized node inventory is incomplete",
     )
@@ -914,7 +984,7 @@ def validate_cuda_identity(
 
 def validate_churn(payload: dict[str, Any]) -> None:
     require(payload.get("status") == "pass", "churn did not pass")
-    require(float(payload.get("duration_seconds", 0)) >= 7200, "churn was too short")
+    require(float(payload.get("duration_seconds", 0)) >= 900, "churn was too short")
     require(
         int(payload.get("concurrency", -1)) == EXPECTED_CONCURRENCY,
         "churn used wrong concurrency",

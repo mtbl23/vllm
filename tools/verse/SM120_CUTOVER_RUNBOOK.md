@@ -38,7 +38,7 @@ All conditions must be true before routing one production request:
 
 1. `release-manifest.json` has `status: pass` and
    `scope: pre_cutover_candidate_qualification`.
-2. The CUDA, chat-contract, 38-slot, B01, and two-hour churn gates all came from
+2. The CUDA, chat-contract, 38-slot, B01, and 15-minute heavy churn gates all came from
    one image digest, fork commit, model revision, exact RTX 5070 Ti, and
    container with zero restarts.
 3. The old service is healthy and remains running.

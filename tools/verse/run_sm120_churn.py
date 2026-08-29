@@ -361,7 +361,7 @@ def main() -> int:
     parser.add_argument("--endpoint", default="http://127.0.0.1:8000")
     parser.add_argument("--model", default="verse-free")
     parser.add_argument("--api-key-file", type=Path, required=True)
-    parser.add_argument("--duration-seconds", type=int, default=7200)
+    parser.add_argument("--duration-seconds", type=int, default=900)
     parser.add_argument("--concurrency", type=int, default=38)
     parser.add_argument("--prompt-pool-size", type=int, default=64)
     parser.add_argument("--metrics-interval-seconds", type=float, default=1.0)

@@ -10,9 +10,11 @@ import concurrent.futures
 import hashlib
 import json
 import math
+import re
 import secrets
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -45,6 +47,58 @@ CAPACITY_COMPLETION_TOKENS = 2048
 CAPACITY_BLOCK_BYTES = 294_912
 CAPACITY_RESERVED_BLOCKS = 1
 CAPACITY_TOTAL_KV_BYTES = 5_704_253_440
+SEMANTIC_CANARY_SEEDS = (1103, 2207, 3301)
+SEMANTIC_COMMON_WORDS = frozenset(
+    {
+        "a",
+        "against",
+        "and",
+        "as",
+        "at",
+        "back",
+        "but",
+        "came",
+        "come",
+        "do",
+        "for",
+        "from",
+        "had",
+        "have",
+        "he",
+        "her",
+        "his",
+        "i",
+        "in",
+        "is",
+        "it",
+        "lantern",
+        "me",
+        "my",
+        "not",
+        "of",
+        "on",
+        "rain",
+        "returned",
+        "she",
+        "still",
+        "that",
+        "the",
+        "there",
+        "they",
+        "this",
+        "through",
+        "to",
+        "tower",
+        "was",
+        "we",
+        "were",
+        "what",
+        "when",
+        "with",
+        "you",
+        "your",
+    }
+)
 
 
 def require(condition: bool, message: str) -> None:
@@ -379,6 +433,132 @@ def greedy_decode_evidence(
     }
 
 
+def completion_text(payload: Any) -> str:
+    require(isinstance(payload, dict), "semantic canary response is not an object")
+    choices = payload.get("choices")
+    require(
+        isinstance(choices, list) and len(choices) == 1,
+        "semantic canary response has the wrong choice count",
+    )
+    choice = choices[0]
+    require(isinstance(choice, dict), "semantic canary choice is not an object")
+    message = choice.get("message")
+    require(isinstance(message, dict), "semantic canary choice has no message")
+    content = message.get("content")
+    require(
+        isinstance(content, str) and content,
+        "semantic canary completion has no text",
+    )
+    return content
+
+
+def semantic_text_evidence(content: str, seed: int) -> dict[str, Any]:
+    character_count = len(content)
+    require(character_count >= 100, "semantic canary completion is implausibly short")
+    printable_count = sum(
+        character.isprintable() or character in "\n\r\t" for character in content
+    )
+    ascii_count = sum(ord(character) < 128 for character in content)
+    alpha_count = sum(character.isalpha() for character in content)
+    replacement_count = content.count("\ufffd")
+    non_latin_letter_count = sum(
+        character.isalpha()
+        and ord(character) >= 128
+        and "LATIN" not in unicodedata.name(character, "")
+        for character in content
+    )
+    words = re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", content.lower())
+    common_word_count = sum(word in SEMANTIC_COMMON_WORDS for word in words)
+    printable_fraction = printable_count / character_count
+    ascii_fraction = ascii_count / character_count
+    alphabetic_fraction = alpha_count / character_count
+    common_word_fraction = common_word_count / max(1, len(words))
+
+    require(
+        printable_fraction >= 0.995,
+        "semantic canary contains non-printable corruption",
+    )
+    require(replacement_count == 0, "semantic canary contains replacement characters")
+    require(
+        ascii_fraction >= 0.97,
+        "semantic canary is not predominantly ASCII English",
+    )
+    require(
+        non_latin_letter_count == 0,
+        "semantic canary contains non-Latin script corruption",
+    )
+    require(len(words) >= 24, "semantic canary has too few English words")
+    require(
+        len(set(words)) >= 14,
+        "semantic canary has implausibly low lexical diversity",
+    )
+    require(
+        alphabetic_fraction >= 0.45,
+        "semantic canary has too little alphabetic text",
+    )
+    require(
+        common_word_fraction >= 0.15,
+        "semantic canary lacks ordinary English structure",
+    )
+    return {
+        "seed": seed,
+        "content_sha256": hashlib.sha256(content.encode()).hexdigest(),
+        "character_count": character_count,
+        "ascii_word_count": len(words),
+        "unique_ascii_word_count": len(set(words)),
+        "printable_fraction": printable_fraction,
+        "ascii_fraction": ascii_fraction,
+        "alphabetic_fraction": alphabetic_fraction,
+        "common_word_fraction": common_word_fraction,
+        "replacement_character_count": replacement_count,
+        "non_latin_letter_count": non_latin_letter_count,
+    }
+
+
+def semantic_rp_evidence(endpoint: str, key: str, model: str) -> dict[str, Any]:
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are Kaelen, a guarded but kind fantasy ranger. Stay in "
+                "character and reply only in natural English. Continue the "
+                "roleplay with actions and dialogue, and address the user as you."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "*I lower my lantern as rain drums against the ruined "
+                "watchtower.* You returned. I thought the pass had taken you."
+            ),
+        },
+    ]
+    runs: list[dict[str, Any]] = []
+    for seed in SEMANTIC_CANARY_SEEDS:
+        status, payload = post(
+            endpoint,
+            "/v1/chat/completions",
+            key,
+            {
+                "model": model,
+                "messages": messages,
+                "temperature": 0.7,
+                "top_p": 0.9,
+                "max_tokens": 64,
+                "ignore_eos": True,
+                "stream": False,
+                "seed": seed,
+            },
+        )
+        require(status == 200, f"semantic RP canary returned HTTP {status}")
+        runs.append(semantic_text_evidence(completion_text(payload), seed))
+    return {
+        "scope": "safe_rp_semantic_integrity",
+        "raw_output_retained": False,
+        "runs": runs,
+    }
+
+
 def parse_metrics(text: str, metric_names: Mapping[str, str]) -> dict[str, float]:
     values: dict[str, list[float]] = {name: [] for name in metric_names}
     expected_to_name = {metric: name for name, metric in metric_names.items()}
@@ -702,6 +882,7 @@ def main() -> int:
         greedy_decode = greedy_decode_evidence(
             endpoint, key, args.model, ordinary_messages
         )
+        semantic_rp = semantic_rp_evidence(endpoint, key, args.model)
         result: dict[str, Any] = {
             "status": "pass",
             "scope": "startup" if args.startup_only else "complete",
@@ -709,6 +890,7 @@ def main() -> int:
             "ordinary_prompt_tokens": ordinary_count,
             "ordinary_stream": stream,
             "greedy_decode_evidence": greedy_decode,
+            "semantic_rp_evidence": semantic_rp,
         }
         if not args.startup_only:
             accepted_messages = exact_context_messages(

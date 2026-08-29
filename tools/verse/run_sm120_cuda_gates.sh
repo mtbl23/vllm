@@ -177,6 +177,8 @@ docker run --rm \
     ROUTING_OUTPUT=$(mktemp)
     GPU_COLLECT=$(mktemp)
     GPU_OUTPUT=$(mktemp)
+    KV_COLLECT=$(mktemp)
+    KV_OUTPUT=$(mktemp)
     B12X_COLLECT=$(mktemp)
     B12X_OUTPUT=$(mktemp)
     python -m pytest --collect-only -q -p no:cacheprovider \
@@ -210,9 +212,22 @@ docker run --rm \
     echo VERSE_GPU_ORACLE_PASSED
 
     python -m pytest --collect-only -q -p no:cacheprovider \
+      tests/kernels/attention/test_cache.py::test_reshape_and_cache_nvfp4_physical_hnd_shape | tee "$KV_COLLECT"
+    KV_COUNT=$(grep -Ec "^tests/.+::" "$KV_COLLECT")
+    ((KV_COUNT == 2))
+    ! grep -Eqi "skipped|deselected|xfailed|xpassed|warning|error" "$KV_COLLECT"
+    python -m pytest -q -p no:cacheprovider --maxfail=1 \
+      tests/kernels/attention/test_cache.py::test_reshape_and_cache_nvfp4_physical_hnd_shape | tee "$KV_OUTPUT"
+    grep -Eq "^${KV_COUNT} passed in [0-9.]+s$" "$KV_OUTPUT"
+    ! grep -Eqi "skipped|deselected|xfailed|xpassed|warning|error" "$KV_OUTPUT"
+    sed -n "s#^\(tests/.*::.*\)$#VERSE_CUDA_TEST_RESULT=passed kv_store_oracle \1#p" \
+      "$KV_COLLECT"
+    echo VERSE_KV_STORE_ORACLE_PASSED
+
+    python -m pytest --collect-only -q -p no:cacheprovider \
       tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py | tee "$B12X_COLLECT"
     B12X_COUNT=$(grep -Ec "^tests/.+::" "$B12X_COLLECT")
-    ((B12X_COUNT == 3))
+    ((B12X_COUNT == 6))
     ! grep -Eqi "skipped|deselected|xfailed|xpassed|warning|error" "$B12X_COLLECT"
     python -m pytest -q -p no:cacheprovider --maxfail=1 \
       tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py | tee "$B12X_OUTPUT"
@@ -226,6 +241,7 @@ docker run --rm \
       tests/v1/attention/test_gemma4_nvfp4_flashinfer_routing.py \
       tests/v1/attention/test_nvfp4_flashinfer_vosplit.py \
       tests/kernels/attention/test_flashinfer.py \
+      tests/kernels/attention/test_cache.py \
       tests/kernels/quantization/nvfp4_utils.py \
       tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py; do
       sha256sum "$artifact" | sed "s#^#VERSE_CUDA_TEST_ARTIFACT_SHA256=#"
@@ -239,6 +255,10 @@ grep -Fxq 'VERSE_ROUTING_GATES_PASSED' "$LOG_TMP" || {
 }
 grep -Fxq 'VERSE_GPU_ORACLE_PASSED' "$LOG_TMP" || {
   echo "the exact SM120 NVFP4 FA2 oracle did not pass" >&2
+  exit 1
+}
+grep -Fxq 'VERSE_KV_STORE_ORACLE_PASSED' "$LOG_TMP" || {
+  echo "the exact SM120 native NVFP4 KV-store oracle did not pass" >&2
   exit 1
 }
 grep -Fxq 'VERSE_B12X_ORACLE_PASSED' "$LOG_TMP" || {
@@ -338,7 +358,7 @@ for line in text.splitlines():
     if match is None or match.group(2) in artifact_hashes:
         raise SystemExit("CUDA test artifact hash record is malformed or duplicated")
     artifact_hashes[match.group(2)] = match.group(1)
-if len(artifact_hashes) != 5:
+if len(artifact_hashes) != 6:
     raise SystemExit("CUDA test artifact hash inventory is incomplete")
 
 if not re.fullmatch(r"[A-Za-z0-9:._-]{8,256}", docker_host_id):
@@ -360,6 +380,7 @@ host_identity_sha256 = hashlib.sha256(
 markers = [
     "VERSE_ROUTING_GATES_PASSED",
     "VERSE_GPU_ORACLE_PASSED",
+    "VERSE_KV_STORE_ORACLE_PASSED",
     "VERSE_B12X_ORACLE_PASSED",
     "SM120 image and native NVFP4 FA2/B12X correctness gates passed",
 ]

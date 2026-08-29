@@ -280,6 +280,33 @@ def test_greedy_decode_evidence_records_repeated_valid_runs(monkeypatch):
     )
 
 
+def test_semantic_text_evidence_accepts_coherent_safe_rp():
+    content = (
+        "*I step beneath the ruined arch and lower my rain-darkened hood, "
+        "watching the lantern tremble in your hand.* You were right to doubt "
+        "the pass. It tried to keep me, but I returned because I promised I "
+        "would. *My expression softens as I move closer, careful not to crowd "
+        "you.* Tell me what happened while I was gone, and this time I will "
+        "listen before I choose the road ahead."
+    )
+
+    evidence = MODULE.semantic_text_evidence(content, 1103)
+
+    assert evidence["ascii_fraction"] == 1.0
+    assert evidence["non_latin_letter_count"] == 0
+    assert evidence["ascii_word_count"] >= 24
+
+
+def test_semantic_text_evidence_rejects_multiscript_token_soup():
+    content = (
+        "соွriTS set วfinat او lit عواموذ unc side 企業 चिर応援 vécu消息ed "
+        "waiver defin birbirinden ПК भक्ति conformalans jok Flavore "
+    ) * 4
+
+    with pytest.raises(ValueError, match="ASCII English|non-Latin"):
+        MODULE.semantic_text_evidence(content, 1103)
+
+
 def test_capacity_probe_overlaps_all_requests_and_observes_running(monkeypatch):
     concurrency = 4
     active = 0
@@ -514,6 +541,15 @@ def test_startup_only_avoids_boundary_capacity(monkeypatch, tmp_path, capsys):
         MODULE,
         "greedy_decode_evidence",
         lambda *args, **kwargs: {"content_sha256": "a", "tokens_sha256": "b"},
+    )
+    monkeypatch.setattr(
+        MODULE,
+        "semantic_rp_evidence",
+        lambda *args, **kwargs: {
+            "scope": "safe_rp_semantic_integrity",
+            "raw_output_retained": False,
+            "runs": [],
+        },
     )
     monkeypatch.setattr(
         MODULE,

@@ -132,6 +132,28 @@ def chat_contract() -> dict:
                 for character in ("e", "f")
             ],
         },
+        "semantic_rp_evidence": {
+            "scope": "safe_rp_semantic_integrity",
+            "raw_output_retained": False,
+            "runs": [
+                {
+                    "seed": seed,
+                    "content_sha256": character * 64,
+                    "character_count": 320,
+                    "ascii_word_count": 52,
+                    "unique_ascii_word_count": 34,
+                    "printable_fraction": 1.0,
+                    "ascii_fraction": 1.0,
+                    "alphabetic_fraction": 0.75,
+                    "common_word_fraction": 0.35,
+                    "replacement_character_count": 0,
+                    "non_latin_letter_count": 0,
+                }
+                for seed, character in zip(
+                    (1103, 2207, 3301), ("7", "8", "9"), strict=True
+                )
+            ],
+        },
         "boundary_accepted_prompt_tokens": 6143,
         "boundary_accepted_stream": stream(1),
         "boundary_rejected_prompt_tokens": 6144,
@@ -317,6 +339,14 @@ def cuda_tests() -> list[dict]:
         }
         for index in range(2)
     )
+    kv_store = [
+        {
+            "node_id": node_id,
+            "result": "passed",
+            "suite": "kv_store_oracle",
+        }
+        for node_id in MODULE.CUDA_KV_STORE_TEST_NODE_IDS
+    ]
     b12x = [
         {
             "node_id": node_id,
@@ -325,7 +355,7 @@ def cuda_tests() -> list[dict]:
         }
         for node_id in MODULE.CUDA_B12X_TEST_NODE_IDS
     ]
-    return [*routing, *gpu, *b12x]
+    return [*routing, *gpu, *kv_store, *b12x]
 
 
 def cuda_artifact_hashes() -> dict[str, str]:
@@ -383,7 +413,7 @@ def server_record() -> str:
 def churn() -> dict:
     return {
         "status": "pass",
-        "duration_seconds": 7201,
+        "duration_seconds": 901,
         "concurrency": 38,
         "prompt_pool_size": 64,
         "completed_requests": 100,
@@ -818,9 +848,12 @@ def test_release_wrappers_anchor_exact_container_and_gpu_ids():
     assert 'docker exec "$VERSE_VLLM_CONTAINER_ID"' in release_runner
     assert "require_env VERSE_VLLM_GPU_UUID" in cuda_runner
     assert '--gpus "device=$VERSE_VLLM_GPU_UUID"' in cuda_runner
-    assert "((B12X_COUNT == 3))" in cuda_runner
+    assert "((KV_COUNT == 2))" in cuda_runner
+    assert "VERSE_KV_STORE_ORACLE_PASSED" in cuda_runner
+    assert "((B12X_COUNT == 6))" in cuda_runner
     assert "VERSE_B12X_ORACLE_PASSED" in cuda_runner
     assert "tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py" in (cuda_runner)
+    assert "COPY tests/kernels/attention/test_cache.py" in dockerfile
     assert (
         "COPY tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py" in dockerfile
     )

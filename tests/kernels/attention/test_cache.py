@@ -438,12 +438,21 @@ def test_reshape_and_cache_flash(
 
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize(
+    ("num_heads", "head_size"),
+    (
+        pytest.param(8, 64, id="shape-regression"),
+        pytest.param(4, 512, id="gemma4-runtime"),
+    ),
+)
 @torch.inference_mode()
 def test_reshape_and_cache_nvfp4_physical_hnd_shape(
     kv_cache_factory_flashinfer,
     device: str,
+    num_heads: int,
+    head_size: int,
 ) -> None:
-    """Regression test for #49012.
+    """Prove the native KV writer at both regression and Verse runtime shapes.
 
     The NVFP4 cache-write kernel must handle a physically-shaped HND cache
     ([num_blocks, num_heads, block_size, dim], as runtime callers allocate)
@@ -457,8 +466,6 @@ def test_reshape_and_cache_nvfp4_physical_hnd_shape(
         pytest.skip("NVFP4 requires compute capability >= 10.0 (Blackwell).")
 
     num_tokens = 42
-    num_heads = 8  # % 4 == 0 -> the silent-corruption path
-    head_size = 64
     block_size = 16  # != num_heads, so the shape is unambiguous
     num_blocks = 64
     dtype = torch.bfloat16
