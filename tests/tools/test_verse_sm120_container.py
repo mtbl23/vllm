@@ -401,6 +401,66 @@ def test_image_verifier_accepts_exact_unconditional_wheel_requirements(
     }
 
 
+def test_image_verifier_records_exact_native_and_wheel_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, image_verifier
+):
+    vllm_root = tmp_path / "site-packages" / "vllm"
+    vllm_root.mkdir(parents=True)
+    native = vllm_root / "_C_stable_libtorch.abi3.so"
+    native.write_bytes(b"exact-native-extension")
+    wheel_manifest = tmp_path / "vllm-wheel.sha256"
+    wheel_manifest.write_text(f"{'a' * 64}  dist/vllm-test.whl\n")
+    monkeypatch.setattr(
+        image_verifier.importlib.util,
+        "find_spec",
+        lambda _name: SimpleNamespace(origin=str(native)),
+    )
+
+    identity = image_verifier.verify_vllm_binary_identity(vllm_root, wheel_manifest)
+
+    assert identity["native_extension"] == {
+        "path": str(native),
+        "bytes": native.stat().st_size,
+        "sha256": hashlib.sha256(native.read_bytes()).hexdigest(),
+    }
+    assert identity["wheel_artifact"] == {
+        "filename": "vllm-test.whl",
+        "sha256": "a" * 64,
+        "manifest_sha256": hashlib.sha256(wheel_manifest.read_bytes()).hexdigest(),
+    }
+
+
+@pytest.mark.parametrize(
+    "wheel_entry",
+    (
+        "vllm-test.whl",
+        "../vllm-test.whl",
+        "dist/subdir/vllm-test.whl",
+        "dist/not-a-wheel.txt",
+    ),
+)
+def test_image_verifier_rejects_noncanonical_wheel_identity_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    image_verifier,
+    wheel_entry: str,
+):
+    vllm_root = tmp_path / "site-packages" / "vllm"
+    vllm_root.mkdir(parents=True)
+    native = vllm_root / "_C_stable_libtorch.abi3.so"
+    native.write_bytes(b"exact-native-extension")
+    wheel_manifest = tmp_path / "vllm-wheel.sha256"
+    wheel_manifest.write_text(f"{'a' * 64}  {wheel_entry}\n")
+    monkeypatch.setattr(
+        image_verifier.importlib.util,
+        "find_spec",
+        lambda _name: SimpleNamespace(origin=str(native)),
+    )
+
+    with pytest.raises(SystemExit, match="wheel identity manifest is malformed"):
+        image_verifier.verify_vllm_binary_identity(vllm_root, wheel_manifest)
+
+
 @pytest.mark.parametrize(
     "requirement_index",
     (0, 1, 2),

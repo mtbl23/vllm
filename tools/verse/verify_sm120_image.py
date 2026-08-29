@@ -32,6 +32,7 @@ EXPECTED_FLASHINFER_REQUIREMENT_URL = (
     "#sha256=50ad966220b5160f17fcb9e064bdfbcda726ec779fb0c74fd3449b3c48c66600"
 )
 VLLM_WHEEL_VERSION_RE = re.compile(r"0\.28\.0\+verse\.[0-9a-f]{12}")
+VLLM_WHEEL_IDENTITY_MANIFEST = Path("/opt/verse/identity/vllm-wheel.sha256")
 FORBIDDEN_RUNTIME_ENVIRONMENT_NAMES = frozenset(
     {
         "FLASHINFER_CUBIN_DIR",
@@ -77,7 +78,10 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def verify_vllm_binary_identity(vllm_root: Path) -> dict[str, object]:
+def verify_vllm_binary_identity(
+    vllm_root: Path,
+    wheel_manifest: Path = VLLM_WHEEL_IDENTITY_MANIFEST,
+) -> dict[str, object]:
     spec = importlib.util.find_spec("vllm._C_stable_libtorch")
     require(spec is not None and spec.origin, "vLLM native extension is absent")
     native_path = Path(spec.origin).resolve()
@@ -86,7 +90,6 @@ def verify_vllm_binary_identity(vllm_root: Path) -> dict[str, object]:
         "vLLM native extension is loaded outside the installed distribution",
     )
 
-    wheel_manifest = Path("/opt/verse/identity/vllm-wheel.sha256")
     require(
         wheel_manifest.is_file() and not wheel_manifest.is_symlink(),
         "vLLM wheel identity manifest is absent",
