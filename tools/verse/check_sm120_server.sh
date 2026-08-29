@@ -61,6 +61,25 @@ MODEL_READY=$(uv run --script "$ROOT/tools/verse/prepare_sm120_model.py" \
 MODEL_DIRECTORY=$(uv run --no-project python -c \
   'import json,sys; print(json.load(sys.stdin)["model_directory"])' \
   <<<"$MODEL_READY")
+MODEL_IDENTITY=$(uv run --no-project python -c '
+import json,sys
+payload=json.load(sys.stdin)
+verification=payload["verification"]
+print(verification["manifest_sha256"])
+print(verification["config_sha256"])
+print(verification["files"])
+print(verification["bytes"])
+' <<<"$MODEL_READY")
+mapfile -t MODEL_IDENTITY_FIELDS <<<"$MODEL_IDENTITY"
+MODEL_MANIFEST_SHA256=${MODEL_IDENTITY_FIELDS[0]}
+MODEL_CONFIG_SHA256=${MODEL_IDENTITY_FIELDS[1]}
+MODEL_FILE_COUNT=${MODEL_IDENTITY_FIELDS[2]}
+MODEL_BYTES=${MODEL_IDENTITY_FIELDS[3]}
+MODEL_READY_MARKER_SHA256=$(uv run --no-project python -c '
+import hashlib,sys
+with open(sys.argv[1], "rb") as handle:
+    print(hashlib.file_digest(handle, "sha256").hexdigest())
+' "$VERSE_MODEL_CACHE_DIR/.verse-sm120-model-ready.json")
 
 INSPECT=$(mktemp)
 VALIDATED=$(mktemp)
@@ -168,6 +187,8 @@ CURRENT_STARTED_AT=$(uv run --no-project python -c \
   exit 1
 }
 
-printf 'status=healthy\ncontainer_id=%s\nendpoint=%s\ncommit=%s\nprofile=%s\ngpu_uuid=%s\n' \
+printf 'status=healthy\ncontainer_id=%s\nendpoint=%s\ncommit=%s\nprofile=%s\ngpu_uuid=%s\nmodel_manifest_sha256=%s\nmodel_config_sha256=%s\nmodel_ready_marker_sha256=%s\nmodel_file_count=%s\nmodel_bytes=%s\n' \
   "$CONTAINER_ID" "$ENDPOINT" "$VERSE_VLLM_EXPECTED_COMMIT" \
-  "$VERSE_RUNTIME_PROFILE" "$GPU_UUID"
+  "$VERSE_RUNTIME_PROFILE" "$GPU_UUID" "$MODEL_MANIFEST_SHA256" \
+  "$MODEL_CONFIG_SHA256" "$MODEL_READY_MARKER_SHA256" \
+  "$MODEL_FILE_COUNT" "$MODEL_BYTES"

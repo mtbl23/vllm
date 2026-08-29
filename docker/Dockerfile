@@ -1090,6 +1090,8 @@ COPY requirements/verse-sm120-flashinfer.lock \
     /opt/verse/requirements/verse-sm120-flashinfer.lock
 COPY tools/verse/verify_sm120_image.py \
     /usr/local/bin/verify-verse-sm120-image
+COPY --from=build /workspace/dist/wheel.sha256 \
+    /opt/verse/identity/vllm-wheel.sha256
 COPY tools/verse/prepare_sm120_model.py \
     /opt/verse-tools/prepare_sm120_model.py
 COPY tools/verse/validate_sm120_profile.py \
@@ -1127,6 +1129,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         /usr/local/bin/verse-sm120-entrypoint.sh \
         /opt/verse-tools/prepare_sm120_model.py \
         /opt/verse-tools/validate_sm120_profile.py
+RUN chmod 0444 /opt/verse/identity/vllm-wheel.sha256
 COPY tests/__init__.py /opt/verse-tests/tests/__init__.py
 COPY tests/kernels/__init__.py /opt/verse-tests/tests/kernels/__init__.py
 COPY tests/kernels/attention/test_flashinfer.py \

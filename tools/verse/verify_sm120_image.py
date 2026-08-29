@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.metadata
 import importlib.util
 import json
@@ -66,6 +67,52 @@ def installed_distributions() -> dict[str, list[importlib.metadata.Distribution]
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise SystemExit(message)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(4 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def verify_vllm_binary_identity(vllm_root: Path) -> dict[str, object]:
+    spec = importlib.util.find_spec("vllm._C_stable_libtorch")
+    require(spec is not None and spec.origin, "vLLM native extension is absent")
+    native_path = Path(spec.origin).resolve()
+    require(
+        native_path.is_file() and native_path.is_relative_to(vllm_root),
+        "vLLM native extension is loaded outside the installed distribution",
+    )
+
+    wheel_manifest = Path("/opt/verse/identity/vllm-wheel.sha256")
+    require(
+        wheel_manifest.is_file() and not wheel_manifest.is_symlink(),
+        "vLLM wheel identity manifest is absent",
+    )
+    fields = wheel_manifest.read_text(encoding="utf-8").strip().split()
+    wheel_path = Path(fields[1]) if len(fields) == 2 else None
+    require(
+        len(fields) == 2
+        and re.fullmatch(r"[0-9a-f]{64}", fields[0]) is not None
+        and wheel_path is not None
+        and wheel_path.parts == ("dist", wheel_path.name)
+        and wheel_path.name.endswith(".whl"),
+        "vLLM wheel identity manifest is malformed",
+    )
+    return {
+        "native_extension": {
+            "path": str(native_path),
+            "bytes": native_path.stat().st_size,
+            "sha256": sha256_file(native_path),
+        },
+        "wheel_artifact": {
+            "filename": wheel_path.name,
+            "sha256": fields[0],
+            "manifest_sha256": sha256_file(wheel_manifest),
+        },
+    }
 
 
 def verify_runtime_environment(environment: Mapping[str, str]) -> None:
@@ -140,7 +187,9 @@ def main() -> int:
         f"wrong vllm wheel: {vllm_matches[0].version}",
     )
     wheel_requirements = verify_vllm_wheel_requirements(vllm_matches[0])
-    paths["vllm"] = str(Path(vllm_matches[0].locate_file("")).resolve())
+    vllm_root = Path(vllm_matches[0].locate_file("")).resolve()
+    paths["vllm"] = str(vllm_root)
+    vllm_binary_identity = verify_vllm_binary_identity(vllm_root / "vllm")
     require(
         not distributions.get("deep-ep"),
         "DeepEP must not be installed in the single-GPU Verse appliance",
@@ -213,6 +262,7 @@ def main() -> int:
                 "torch_cuda": torch.version.cuda,
                 "vllm_wheel_version": vllm_wheel_version,
                 "vllm_wheel_requirements": wheel_requirements,
+                "vllm_binary_identity": vllm_binary_identity,
                 "flashinfer_commit": commit,
                 "distributions": EXPECTED_DISTRIBUTIONS,
                 "distribution_paths": paths,

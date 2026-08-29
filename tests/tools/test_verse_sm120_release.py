@@ -295,6 +295,23 @@ def cuda_image_verification() -> dict:
             name: "/usr/local/lib/python3.12/site-packages"
             for name in MODULE.EXPECTED_DISTRIBUTIONS
         },
+        "vllm_binary_identity": {
+            "native_extension": {
+                "path": (
+                    "/usr/local/lib/python3.12/site-packages/vllm/"
+                    "_C_stable_libtorch.abi3.so"
+                ),
+                "bytes": 123456,
+                "sha256": "3" * 64,
+            },
+            "wheel_artifact": {
+                "filename": (
+                    "vllm-0.28.0+verse.test-cp38-abi3-manylinux_2_28_x86_64.whl"
+                ),
+                "sha256": "4" * 64,
+                "manifest_sha256": "5" * 64,
+            },
+        },
         "gpu": {"name": "NVIDIA GeForce RTX 5070 Ti", "capability": [12, 0]},
     }
 
@@ -407,6 +424,11 @@ def server_record() -> str:
         "endpoint=http://127.0.0.1:8000\n"
         f"commit={FORK_COMMIT}\n"
         f"profile={MODULE.EXPECTED_PROFILE_IDENTITY}\n"
+        f"model_manifest_sha256={MODULE.EXPECTED_PROFILE['VERSE_MODEL_MANIFEST_SHA256']}\n"
+        f"model_config_sha256={'6' * 64}\n"
+        f"model_ready_marker_sha256={'7' * 64}\n"
+        "model_file_count=22\n"
+        "model_bytes=10403188777\n"
     )
 
 

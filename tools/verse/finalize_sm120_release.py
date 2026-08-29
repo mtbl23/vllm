@@ -858,6 +858,33 @@ def validate_cuda_identity(
         verification.get("distributions") == EXPECTED_DISTRIBUTIONS,
         "CUDA oracle dependency tuple drifted",
     )
+    binary_identity = verification.get("vllm_binary_identity")
+    require(
+        isinstance(binary_identity, dict)
+        and set(binary_identity) == {"native_extension", "wheel_artifact"},
+        "CUDA oracle lacks immutable vLLM binary identity",
+    )
+    native_extension = binary_identity.get("native_extension")
+    wheel_artifact = binary_identity.get("wheel_artifact")
+    require(
+        isinstance(native_extension, dict)
+        and set(native_extension) == {"path", "bytes", "sha256"}
+        and str(native_extension.get("path", "")).endswith(
+            "/vllm/_C_stable_libtorch.abi3.so"
+        )
+        and int(native_extension.get("bytes", 0)) > 0
+        and SHA256_RE.fullmatch(str(native_extension.get("sha256", ""))) is not None,
+        "CUDA oracle native extension identity is invalid",
+    )
+    require(
+        isinstance(wheel_artifact, dict)
+        and set(wheel_artifact) == {"filename", "sha256", "manifest_sha256"}
+        and str(wheel_artifact.get("filename", "")).endswith(".whl")
+        and SHA256_RE.fullmatch(str(wheel_artifact.get("sha256", ""))) is not None
+        and SHA256_RE.fullmatch(str(wheel_artifact.get("manifest_sha256", "")))
+        is not None,
+        "CUDA oracle wheel identity is invalid",
+    )
     gpu = verification.get("gpu")
     require(isinstance(gpu, dict), "CUDA oracle GPU identity is absent")
     require(
@@ -1194,6 +1221,23 @@ def finalize(release_dir: Path) -> dict[str, Any]:
         require(
             profile_lines == [f"profile={EXPECTED_PROFILE_IDENTITY}"],
             f"{relative} has the wrong runtime profile",
+        )
+        server_pairs = [line.split("=", 1) for line in lines if "=" in line]
+        require(
+            len(server_pairs) == len({key for key, _ in server_pairs}),
+            f"{relative} contains duplicate evidence fields",
+        )
+        server_fields = dict(server_pairs)
+        require(
+            server_fields.get("model_manifest_sha256")
+            == EXPECTED_PROFILE["VERSE_MODEL_MANIFEST_SHA256"]
+            and SHA256_RE.fullmatch(server_fields.get("model_config_sha256", ""))
+            is not None
+            and SHA256_RE.fullmatch(server_fields.get("model_ready_marker_sha256", ""))
+            is not None
+            and int(server_fields.get("model_file_count", "0")) > 0
+            and int(server_fields.get("model_bytes", "0")) > 0,
+            f"{relative} lacks immutable model-byte evidence",
         )
 
     hashes = {relative: sha256_bytes(data) for relative, data in artifacts.items()}
