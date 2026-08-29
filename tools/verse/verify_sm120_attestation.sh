@@ -60,6 +60,7 @@ GH_TOKEN=$TOKEN gh attestation verify "oci://$IMAGE" \
     https://github.com/mtbl23/vllm/.github/workflows/verse-sm120-image.yml \
   --source-ref refs/heads/verse/v0.28-sm120-nvfp4-fa2 \
   --source-digest "$COMMIT" \
+  --predicate-type https://slsa.dev/provenance/v1 \
   --deny-self-hosted-runners \
   --format json >"$TMP"
 unset TOKEN
@@ -68,6 +69,9 @@ import json, pathlib, sys
 payload = json.loads(pathlib.Path(sys.argv[1]).read_bytes())
 if not isinstance(payload, list) or not payload:
     raise SystemExit("attestation verification output is absent")
+pathlib.Path(sys.argv[1]).write_text(
+    json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+)
 ' "$TMP"
 chmod 0600 "$TMP"
 mv "$TMP" "$OUTPUT"

@@ -8,6 +8,7 @@ GATEWAY_NAME=${VERSE_SM120_GATEWAY_CONTAINER:-verse-sm120-gateway}
 VLLM_CONTAINER_ID=${VERSE_VLLM_CONTAINER_ID:-}
 RELEASE_MANIFEST=${VERSE_VLLM_RELEASE_MANIFEST:-}
 API_KEY_FILE=${VERSE_VLLM_API_KEY_FILE:-}
+GITHUB_TOKEN_FILE=${VERSE_VLLM_GITHUB_TOKEN_FILE:-}
 
 [[ $VLLM_CONTAINER_ID =~ ^[0-9a-f]{64}$ ]] || {
   echo "VERSE_VLLM_CONTAINER_ID must be the exact 64-character candidate container ID" >&2
@@ -33,6 +34,10 @@ if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
     raise SystemExit(1)
 ' "$API_KEY_FILE" || {
   echo "vLLM API key file must be caller-owned with exact mode 0600" >&2
+  exit 1
+}
+[[ $GITHUB_TOKEN_FILE == /* && -f $GITHUB_TOKEN_FILE && ! -L $GITHUB_TOKEN_FILE ]] || {
+  echo "VERSE_VLLM_GITHUB_TOKEN_FILE must be an absolute regular file" >&2
   exit 1
 }
 
@@ -98,6 +103,46 @@ API_KEY=$(cat "$API_KEY_FILE")
   echo "vLLM API key must contain one non-empty line" >&2
   exit 1
 }
+GATEWAY_ID=""
+MODEL_RESPONSE=""
+AUTH_HEADER=""
+ATTESTATION_DIR=""
+cleanup_failed_gateway() {
+  local status=$?
+  [[ -z $MODEL_RESPONSE ]] || rm -f "$MODEL_RESPONSE"
+  [[ -z $AUTH_HEADER ]] || rm -f "$AUTH_HEADER"
+  if [[ -n $ATTESTATION_DIR ]]; then
+    rm -f "$ATTESTATION_DIR/verification.json"
+    rmdir "$ATTESTATION_DIR" 2>/dev/null || true
+  fi
+  if ((status != 0)) && [[ -n $GATEWAY_ID ]]; then
+    local owned_id
+    owned_id=$(docker inspect --format '{{.Id}}' "$GATEWAY_ID" 2>/dev/null || true)
+    if [[ $owned_id == "$GATEWAY_ID" ]]; then
+      docker logs --tail 100 "$GATEWAY_ID" >&2 2>/dev/null || true
+      docker rm --force "$GATEWAY_ID" >/dev/null 2>&1 || true
+    fi
+  fi
+  exit "$status"
+}
+trap cleanup_failed_gateway EXIT
+ATTESTATION_DIR=$(mktemp -d)
+VERSE_VLLM_IMAGE=$CANDIDATE_IMAGE \
+VERSE_VLLM_EXPECTED_COMMIT=$CANDIDATE_COMMIT \
+VERSE_VLLM_GITHUB_TOKEN_FILE=$GITHUB_TOKEN_FILE \
+VERSE_VLLM_ATTESTATION_VERIFICATION_OUTPUT=\
+"$ATTESTATION_DIR/verification.json" \
+  "$ROOT/tools/verse/verify_sm120_attestation.sh" >/dev/null
+LIVE_ATTESTATION_SHA256=$(uv run --no-project python -c '
+import hashlib, pathlib, sys
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+' "$ATTESTATION_DIR/verification.json")
+[[ $LIVE_ATTESTATION_SHA256 == "$ATTESTATION_VERIFICATION_SHA256" ]] || {
+  echo "live image attestation verification differs from the release manifest" >&2
+  rm -f "$ATTESTATION_DIR/verification.json"
+  rmdir "$ATTESTATION_DIR"
+  exit 1
+}
 if docker container inspect "$GATEWAY_NAME" >/dev/null 2>&1; then
   echo "gateway container $GATEWAY_NAME already exists; refusing replacement" >&2
   exit 1
@@ -110,25 +155,6 @@ docker run --rm \
   --security-opt no-new-privileges \
   --mount "type=bind,src=$CADDY_CONFIG,dst=/etc/caddy/Caddyfile,readonly" \
   "$CADDY_IMAGE" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-
-GATEWAY_ID=""
-MODEL_RESPONSE=""
-AUTH_HEADER=""
-cleanup_failed_gateway() {
-  local status=$?
-  [[ -z $MODEL_RESPONSE ]] || rm -f "$MODEL_RESPONSE"
-  [[ -z $AUTH_HEADER ]] || rm -f "$AUTH_HEADER"
-  if ((status != 0)) && [[ -n $GATEWAY_ID ]]; then
-    local owned_id
-    owned_id=$(docker inspect --format '{{.Id}}' "$GATEWAY_ID" 2>/dev/null || true)
-    if [[ $owned_id == "$GATEWAY_ID" ]]; then
-      docker logs --tail 100 "$GATEWAY_ID" >&2 2>/dev/null || true
-      docker rm --force "$GATEWAY_ID" >/dev/null 2>&1 || true
-    fi
-  fi
-  exit "$status"
-}
-trap cleanup_failed_gateway EXIT
 
 GATEWAY_ID=$(docker create \
   --name "$GATEWAY_NAME" \
@@ -162,12 +188,25 @@ docker start "$GATEWAY_ID" >/dev/null
 deadline=$((SECONDS + 30))
 until curl --noproxy '*' --fail --silent --show-error --max-time 2 \
   http://127.0.0.1:8080/health >/dev/null 2>&1; do
+  [[ $(docker inspect --format '{{.State.Running}}' "$GATEWAY_ID") == true ]] || {
+    echo "gateway container exited before readiness" >&2
+    exit 1
+  }
   ((SECONDS < deadline)) || {
     echo "gateway did not become healthy" >&2
     exit 1
   }
   sleep 1
 done
+[[ $(docker inspect --format '{{.Id}}' "$GATEWAY_ID") == "$GATEWAY_ID" ]] || {
+  echo "gateway container identity changed during readiness" >&2
+  exit 1
+}
+[[ $(docker inspect --format '{{.State.Running}} {{.RestartCount}}' \
+  "$GATEWAY_ID") == "true 0" ]] || {
+  echo "gateway container is not the live zero-restart listener" >&2
+  exit 1
+}
 
 MODEL_RESPONSE=$(mktemp)
 AUTH_HEADER=$(mktemp)
@@ -205,5 +244,7 @@ done
 
 trap - EXIT
 rm -f "$MODEL_RESPONSE" "$AUTH_HEADER"
+rm -f "$ATTESTATION_DIR/verification.json"
+rmdir "$ATTESTATION_DIR"
 printf 'status=ready\ngateway_container_id=%s\nupstream_container_id=%s\nrelease_manifest_sha256=%s\nendpoint=http://127.0.0.1:8080\n' \
   "$GATEWAY_ID" "$VLLM_CONTAINER_ID" "$RELEASE_MANIFEST_SHA256"

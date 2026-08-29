@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from validate_sm120_gateway_release import load_owned_file, validate
+from verify_sm120_public_gateway import _cloudflare_tunnel_ingress_binding, _NoRedirect
 
 API_ROOT = "https://api.cloudflare.com/client/v4"
 HEX_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -96,6 +97,12 @@ def _validate_target_binding(
     proof_zone_id: str,
     proof_record_id: str,
     proof_hostname: str,
+    proof_account_id: str,
+    production_hostname: str,
+    route_zone_id: str,
+    route_record_id: str,
+    expected_current_tunnel: str,
+    expected_modified_on: str,
 ) -> dict[str, Any]:
     proof, proof_sha256 = _load_public_proof(proof_path)
     if (
@@ -120,6 +127,31 @@ def _validate_target_binding(
         raise ValueError(
             "public proof does not bind the exact DNS record to the tunnel"
         )
+    tunnel_ingress = proof.get("tunnel_ingress_binding")
+    expected_ingress = {
+        "account_id": proof_account_id,
+        "tunnel_id": target_tunnel,
+        "proof_hostname": proof_hostname,
+        "production_hostname": production_hostname,
+        "service": "http://127.0.0.1:8080",
+    }
+    if not isinstance(tunnel_ingress, dict) or any(
+        tunnel_ingress.get(name) != expected
+        for name, expected in expected_ingress.items()
+    ):
+        raise ValueError("public proof does not bind production ingress to the tunnel")
+    route_precondition = proof.get("route_precondition")
+    expected_route_precondition = {
+        "zone_id": route_zone_id,
+        "record_id": route_record_id,
+        "hostname": production_hostname,
+        "record_type": "CNAME",
+        "proxied": True,
+        "content": _tunnel_cname(expected_current_tunnel),
+        "modified_on": expected_modified_on,
+    }
+    if route_precondition != expected_route_precondition:
+        raise ValueError("public proof does not bind the exact pre-cutover route state")
     identity: dict[str, str] = {}
     manifest_sha256: str | None = None
     if target_mode == "qualified-candidate":
@@ -165,7 +197,7 @@ def _validate_target_binding(
     now = datetime.now(timezone.utc)
     if (
         verified_at.tzinfo is None
-        or not now - timedelta(minutes=15) <= verified_at <= now
+        or not now - timedelta(minutes=2) <= verified_at <= now
     ):
         raise ValueError("public proof is stale or from the future")
     return {
@@ -176,6 +208,8 @@ def _validate_target_binding(
         "public_proof_sha256": proof_sha256,
         "public_proof_verified_at": proof["verified_at"],
         "proof_dns_binding": dns_binding,
+        "proof_tunnel_ingress_binding": tunnel_ingress,
+        "proof_route_precondition": route_precondition,
     }
 
 
@@ -217,7 +251,7 @@ def _api_request(
         headers=headers,
         method=method,
     )
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
     try:
         with opener.open(request, timeout=20) as response:
             raw = response.read(1_000_001)
@@ -302,6 +336,8 @@ def main() -> int:
     parser.add_argument("--target-proof-zone-id")
     parser.add_argument("--target-proof-record-id")
     parser.add_argument("--target-proof-hostname")
+    parser.add_argument("--target-proof-account-id")
+    parser.add_argument("--target-proof-api-token-file", type=Path)
     parser.add_argument(
         "--target-mode",
         choices=("qualified-candidate", "recorded-rollback"),
@@ -355,12 +391,15 @@ def main() -> int:
         or args.target_proof_zone_id is None
         or args.target_proof_record_id is None
         or args.target_proof_hostname is None
+        or args.target_proof_account_id is None
+        or args.target_proof_api_token_file is None
     ):
         parser.error(
             "switch requires --apply, target tunnel/release/proof, receipt, and lock"
         )
     if (
-        not HEX_ID.fullmatch(args.target_proof_zone_id)
+        not HEX_ID.fullmatch(args.target_proof_account_id)
+        or not HEX_ID.fullmatch(args.target_proof_zone_id)
         or not HEX_ID.fullmatch(args.target_proof_record_id)
         or not re.fullmatch(r"[a-z0-9.-]+", args.target_proof_hostname)
         or "." not in args.target_proof_hostname
@@ -377,6 +416,12 @@ def main() -> int:
         proof_zone_id=args.target_proof_zone_id,
         proof_record_id=args.target_proof_record_id,
         proof_hostname=args.target_proof_hostname,
+        proof_account_id=args.target_proof_account_id,
+        production_hostname=args.hostname,
+        route_zone_id=args.zone_id,
+        route_record_id=args.record_id,
+        expected_current_tunnel=args.expected_current_tunnel,
+        expected_modified_on=str(record.get("modified_on", "")),
     )
 
     pending = {
@@ -404,6 +449,15 @@ def main() -> int:
         )
         if latest.get("modified_on") != record.get("modified_on"):
             raise RuntimeError("DNS record changed after preflight; refusing mutation")
+        current_ingress = _cloudflare_tunnel_ingress_binding(
+            account_id=args.target_proof_account_id,
+            target_tunnel=args.target_tunnel,
+            proof_hostname=args.target_proof_hostname,
+            production_hostname=args.hostname,
+            token=_read_secret(args.target_proof_api_token_file),
+        )
+        if current_ingress != target_binding["proof_tunnel_ingress_binding"]:
+            raise RuntimeError("target tunnel ingress changed after public proof")
         changed = _api_request(
             method="PATCH",
             path=path,

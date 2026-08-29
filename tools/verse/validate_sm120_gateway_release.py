@@ -11,6 +11,7 @@ import json
 import os
 import re
 import stat
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from validate_sm120_profile import EXPECTED_PROFILE
@@ -91,26 +92,33 @@ def validate(
     fork_commit: str,
 ) -> dict[str, str]:
     require(payload.get("status") == "pass", "release manifest did not pass")
-    scope = payload.get("scope")
     require(
-        scope
-        in {
-            "pre_cutover_candidate_qualification",
-            "pre_cutover_candidate_binding",
-        },
+        payload.get("scope") == "pre_cutover_candidate_binding",
         "release manifest has the wrong scope",
     )
-    if scope == "pre_cutover_candidate_binding":
-        require(
-            HEX64.fullmatch(str(payload.get("qualification_manifest_sha256", "")))
-            is not None,
-            "release manifest has an invalid qualification hash",
-        )
-        require(
-            HEX64.fullmatch(str(payload.get("candidate_validation_sha256", "")))
-            is not None,
-            "release manifest has an invalid candidate validation hash",
-        )
+    require(
+        HEX64.fullmatch(str(payload.get("qualification_manifest_sha256", "")))
+        is not None,
+        "release manifest has an invalid qualification hash",
+    )
+    require(
+        HEX64.fullmatch(str(payload.get("candidate_validation_sha256", "")))
+        is not None,
+        "release manifest has an invalid candidate validation hash",
+    )
+    try:
+        created_at = datetime.fromisoformat(str(payload.get("created_at", "")))
+        expires_at = datetime.fromisoformat(str(payload.get("expires_at", "")))
+    except ValueError as error:
+        raise ValueError("release binding has invalid timestamps") from error
+    now = datetime.now(timezone.utc)
+    require(
+        created_at.tzinfo is not None
+        and expires_at.tzinfo is not None
+        and created_at <= now <= expires_at
+        and timedelta(0) < expires_at - created_at <= timedelta(minutes=30),
+        "release binding is stale, premature, or overlong",
+    )
     require(
         payload.get("profile") == EXPECTED_PROFILE["VERSE_RUNTIME_PROFILE"],
         "release manifest has the wrong profile",

@@ -7,7 +7,7 @@ import json
 import os
 import stat
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -33,7 +33,13 @@ MODEL_REVISION = "e2c6cd9c3302e91c032a378a607009c82ba16fac"
 ATTESTATION_SHA256 = "f" * 64
 PROOF_ZONE_ID = "1" * 32
 PROOF_RECORD_ID = "2" * 32
+PROOF_ACCOUNT_ID = "3" * 32
 PROOF_HOSTNAME = "candidate-proof.verse-rp.com"
+PRODUCTION_HOSTNAME = "free-inference.verse-rp.com"
+STABLE_ZONE_ID = "b" * 32
+STABLE_RECORD_ID = "a" * 32
+CURRENT_TUNNEL = "11111111-2222-3333-4444-555555555555"
+STABLE_MODIFIED_ON = "2026-08-29T00:00:00Z"
 
 
 def _load(name: str, path: Path):
@@ -52,13 +58,18 @@ binder = _load("bind_sm120_candidate_release", BIND_PATH)
 
 
 def _release_manifest() -> dict:
+    created_at = datetime.now(timezone.utc)
     return {
         "status": "pass",
-        "scope": "pre_cutover_candidate_qualification",
+        "scope": "pre_cutover_candidate_binding",
         "profile": "sm120-gemma4-nvfp4-v4",
         "source_commit": FORK_COMMIT,
         "model_revision": MODEL_REVISION,
         "release_nonce": RELEASE_NONCE,
+        "created_at": created_at.isoformat(),
+        "expires_at": (created_at + timedelta(minutes=30)).isoformat(),
+        "qualification_manifest_sha256": "8" * 64,
+        "candidate_validation_sha256": "9" * 64,
         "image_attestation": {
             "image_repository": "registry/runtime",
             "image_sha256": "a" * 64,
@@ -99,6 +110,25 @@ def _write_target_binding(tmp_path: Path, target_tunnel: str) -> tuple[Path, Pat
                     "content": f"{target_tunnel}.cfargotunnel.com",
                     "modified_on": "2026-08-29T00:00:00Z",
                 },
+                "tunnel_ingress_binding": {
+                    "account_id": PROOF_ACCOUNT_ID,
+                    "tunnel_id": target_tunnel,
+                    "proof_hostname": PROOF_HOSTNAME,
+                    "production_hostname": PRODUCTION_HOSTNAME,
+                    "service": "http://127.0.0.1:8080",
+                    "proof_rule_index": 0,
+                    "production_rule_index": 1,
+                    "config_version": 7,
+                },
+                "route_precondition": {
+                    "zone_id": STABLE_ZONE_ID,
+                    "record_id": STABLE_RECORD_ID,
+                    "hostname": PRODUCTION_HOSTNAME,
+                    "record_type": "CNAME",
+                    "proxied": True,
+                    "content": f"{CURRENT_TUNNEL}.cfargotunnel.com",
+                    "modified_on": STABLE_MODIFIED_ON,
+                },
             },
             sort_keys=True,
         )
@@ -138,6 +168,8 @@ def test_gateway_is_bound_to_exact_candidate_network_namespace():
     assert '{"8000/tcp", "8080/tcp"}' in text
     assert "candidate must publish only 127.0.0.1:8080 for its gateway" in text
     assert "vLLM API key file must be caller-owned with exact mode 0600" in text
+    assert "gateway container is not the live zero-restart listener" in text
+    assert "verify_sm120_attestation.sh" in text
 
 
 def test_attestation_verifier_uses_exact_github_policy():
@@ -150,6 +182,7 @@ def test_attestation_verifier_uses_exact_github_policy():
     )
     assert "--source-ref refs/heads/verse/v0.28-sm120-nvfp4-fa2" in text
     assert '--source-digest "$COMMIT"' in text
+    assert "--predicate-type https://slsa.dev/provenance/v1" in text
     assert "--deny-self-hosted-runners" in text
     assert "--format json" in text
 
@@ -208,6 +241,96 @@ def test_public_proof_reads_exact_cloudflare_dns_binding(
             target_tunnel=tunnel,
             token="secret",
         )
+
+
+def test_public_proof_binds_proof_and_production_ingress(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    tunnel = "11111111-2222-3333-4444-555555555555"
+    payload = {
+        "success": True,
+        "result": {
+            "version": 7,
+            "config": {
+                "ingress": [
+                    {
+                        "hostname": PROOF_HOSTNAME,
+                        "service": "http://127.0.0.1:8080",
+                    },
+                    {
+                        "hostname": PRODUCTION_HOSTNAME,
+                        "service": "http://127.0.0.1:8080",
+                    },
+                    {"service": "http_status:404"},
+                ]
+            },
+        },
+    }
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, size):
+            del size
+            return json.dumps(payload).encode()
+
+    class Opener:
+        def open(self, request, timeout):
+            assert request.full_url.endswith(f"/{tunnel}/configurations")
+            assert timeout == 20
+            return Response()
+
+    monkeypatch.setattr(public.urllib.request, "build_opener", lambda *args: Opener())
+    binding = public._cloudflare_tunnel_ingress_binding(
+        account_id=PROOF_ACCOUNT_ID,
+        target_tunnel=tunnel,
+        proof_hostname=PROOF_HOSTNAME,
+        production_hostname=PRODUCTION_HOSTNAME,
+        token="secret",
+    )
+
+    assert binding["production_hostname"] == PRODUCTION_HOSTNAME
+    payload["result"]["config"]["ingress"][1]["service"] = "http://127.0.0.1:9999"
+    with pytest.raises(RuntimeError, match="shadowed by an earlier rule"):
+        public._cloudflare_tunnel_ingress_binding(
+            account_id=PROOF_ACCOUNT_ID,
+            target_tunnel=tunnel,
+            proof_hostname=PROOF_HOSTNAME,
+            production_hostname=PRODUCTION_HOSTNAME,
+            token="secret",
+        )
+
+    payload["result"]["config"]["ingress"] = [
+        {"hostname": "*.verse-rp.com", "service": "http://127.0.0.1:9999"},
+        {
+            "hostname": PROOF_HOSTNAME,
+            "service": "http://127.0.0.1:8080",
+        },
+        {
+            "hostname": PRODUCTION_HOSTNAME,
+            "service": "http://127.0.0.1:8080",
+        },
+        {"service": "http_status:404"},
+    ]
+    with pytest.raises(RuntimeError, match="shadowed by an earlier rule"):
+        public._cloudflare_tunnel_ingress_binding(
+            account_id=PROOF_ACCOUNT_ID,
+            target_tunnel=tunnel,
+            proof_hostname=PROOF_HOSTNAME,
+            production_hostname=PRODUCTION_HOSTNAME,
+            token="secret",
+        )
+
+
+def test_public_gateway_never_follows_redirects():
+    handler = public._NoRedirect()
+    assert (
+        handler.redirect_request(None, None, 302, "Found", {}, "https://other") is None
+    )
 
 
 def test_dual_gateway_is_loopback_sticky_and_fail_closed():
@@ -313,8 +436,8 @@ def test_cloudflare_route_reserves_receipt_and_rechecks_before_patch(
     token.chmod(0o600)
     receipt = tmp_path / "receipt.json"
     lock = tmp_path / "cutover.lock"
-    record_id = "a" * 32
-    current_tunnel = "11111111-2222-3333-4444-555555555555"
+    record_id = STABLE_RECORD_ID
+    current_tunnel = CURRENT_TUNNEL
     target_tunnel = "66666666-7777-8888-9999-aaaaaaaaaaaa"
     current = route._tunnel_cname(current_tunnel)
     target = route._tunnel_cname(target_tunnel)
@@ -348,13 +471,27 @@ def test_cloudflare_route_reserves_receipt_and_rechecks_before_patch(
 
     monkeypatch.setattr(route, "_api_request", request)
     monkeypatch.setattr(
+        route,
+        "_cloudflare_tunnel_ingress_binding",
+        lambda **kwargs: {
+            "account_id": kwargs["account_id"],
+            "tunnel_id": kwargs["target_tunnel"],
+            "proof_hostname": kwargs["proof_hostname"],
+            "production_hostname": kwargs["production_hostname"],
+            "service": "http://127.0.0.1:8080",
+            "proof_rule_index": 0,
+            "production_rule_index": 1,
+            "config_version": 7,
+        },
+    )
+    monkeypatch.setattr(
         sys,
         "argv",
         [
             str(ROUTE_PATH),
             "switch",
             "--zone-id",
-            "b" * 32,
+            STABLE_ZONE_ID,
             "--record-id",
             record_id,
             "--hostname",
@@ -381,6 +518,10 @@ def test_cloudflare_route_reserves_receipt_and_rechecks_before_patch(
             PROOF_RECORD_ID,
             "--target-proof-hostname",
             PROOF_HOSTNAME,
+            "--target-proof-account-id",
+            PROOF_ACCOUNT_ID,
+            "--target-proof-api-token-file",
+            str(token.resolve()),
             "--apply",
         ],
     )
@@ -409,6 +550,37 @@ def test_target_binding_rejects_proof_for_another_manifest(tmp_path: Path):
             proof_zone_id=PROOF_ZONE_ID,
             proof_record_id=PROOF_RECORD_ID,
             proof_hostname=PROOF_HOSTNAME,
+            proof_account_id=PROOF_ACCOUNT_ID,
+            production_hostname=PRODUCTION_HOSTNAME,
+            route_zone_id=STABLE_ZONE_ID,
+            route_record_id=STABLE_RECORD_ID,
+            expected_current_tunnel=CURRENT_TUNNEL,
+            expected_modified_on=STABLE_MODIFIED_ON,
+        )
+
+
+def test_target_binding_rejects_consumed_route_precondition(tmp_path: Path):
+    tunnel = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+    manifest, proof = _write_target_binding(tmp_path, tunnel)
+    payload = json.loads(proof.read_text())
+    payload["route_precondition"]["modified_on"] = "2026-08-29T00:00:01Z"
+    proof.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match="exact pre-cutover route state"):
+        route._validate_target_binding(
+            manifest_path=manifest,
+            proof_path=proof,
+            target_tunnel=tunnel,
+            target_mode="qualified-candidate",
+            proof_zone_id=PROOF_ZONE_ID,
+            proof_record_id=PROOF_RECORD_ID,
+            proof_hostname=PROOF_HOSTNAME,
+            proof_account_id=PROOF_ACCOUNT_ID,
+            production_hostname=PRODUCTION_HOSTNAME,
+            route_zone_id=STABLE_ZONE_ID,
+            route_record_id=STABLE_RECORD_ID,
+            expected_current_tunnel=CURRENT_TUNNEL,
+            expected_modified_on=STABLE_MODIFIED_ON,
         )
 
 
@@ -433,6 +605,25 @@ def test_recorded_rollback_requires_fresh_public_service_proof(tmp_path: Path):
                     "proxied": True,
                     "content": f"{tunnel}.cfargotunnel.com",
                 },
+                "tunnel_ingress_binding": {
+                    "account_id": PROOF_ACCOUNT_ID,
+                    "tunnel_id": tunnel,
+                    "proof_hostname": PROOF_HOSTNAME,
+                    "production_hostname": PRODUCTION_HOSTNAME,
+                    "service": "http://127.0.0.1:8080",
+                    "proof_rule_index": 0,
+                    "production_rule_index": 1,
+                    "config_version": 7,
+                },
+                "route_precondition": {
+                    "zone_id": STABLE_ZONE_ID,
+                    "record_id": STABLE_RECORD_ID,
+                    "hostname": PRODUCTION_HOSTNAME,
+                    "record_type": "CNAME",
+                    "proxied": True,
+                    "content": f"{CURRENT_TUNNEL}.cfargotunnel.com",
+                    "modified_on": STABLE_MODIFIED_ON,
+                },
             }
         )
     )
@@ -444,6 +635,12 @@ def test_recorded_rollback_requires_fresh_public_service_proof(tmp_path: Path):
         proof_zone_id=PROOF_ZONE_ID,
         proof_record_id=PROOF_RECORD_ID,
         proof_hostname=PROOF_HOSTNAME,
+        proof_account_id=PROOF_ACCOUNT_ID,
+        production_hostname=PRODUCTION_HOSTNAME,
+        route_zone_id=STABLE_ZONE_ID,
+        route_record_id=STABLE_RECORD_ID,
+        expected_current_tunnel=CURRENT_TUNNEL,
+        expected_modified_on=STABLE_MODIFIED_ON,
     )
     assert binding["target_mode"] == "recorded-rollback"
     assert binding["model"] == "verse-free"
@@ -489,6 +686,14 @@ def test_release_manifest_binds_exact_candidate(tmp_path: Path):
             image_digest=IMAGE_DIGEST,
             fork_commit=FORK_COMMIT,
         )
+    payload["scope"] = "pre_cutover_candidate_qualification"
+    with pytest.raises(ValueError, match="wrong scope"):
+        release.validate(
+            payload,
+            container_id=CONTAINER_ID,
+            image_digest=IMAGE_DIGEST,
+            fork_commit=FORK_COMMIT,
+        )
 
 
 def test_candidate_binding_requires_passed_image_qualification():
@@ -525,6 +730,25 @@ def test_candidate_binding_requires_passed_image_qualification():
     assert result["scope"] == "pre_cutover_candidate_binding"
     assert result["qualification_manifest_sha256"] == "1" * 64
     assert result["candidate_validation_sha256"] == "2" * 64
+    assert (
+        release.validate(
+            result,
+            container_id=CONTAINER_ID,
+            image_digest=IMAGE_DIGEST,
+            fork_commit=FORK_COMMIT,
+        )["candidate_container_id"]
+        == CONTAINER_ID
+    )
+    stale = dict(result)
+    stale["created_at"] = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    stale["expires_at"] = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    with pytest.raises(ValueError, match="stale, premature, or overlong"):
+        release.validate(
+            stale,
+            container_id=CONTAINER_ID,
+            image_digest=IMAGE_DIGEST,
+            fork_commit=FORK_COMMIT,
+        )
     with pytest.raises(ValueError, match="candidate validation drifted"):
         binder.bind(
             qualification,

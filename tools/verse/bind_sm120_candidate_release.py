@@ -10,6 +10,7 @@ import argparse
 import json
 import re
 import secrets
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +90,8 @@ def bind(
     }
     for name, value in expected_candidate.items():
         require(candidate.get(name) == value, f"candidate validation drifted: {name}")
+    created_at = datetime.now(timezone.utc)
+    expires_at = created_at + timedelta(minutes=30)
     return {
         "schema_version": 1,
         "status": "pass",
@@ -97,6 +100,8 @@ def bind(
         "source_commit": commit,
         "model_revision": EXPECTED_PROFILE["VERSE_MODEL_REVISION"],
         "release_nonce": secrets.token_hex(32),
+        "created_at": created_at.isoformat(),
+        "expires_at": expires_at.isoformat(),
         "qualification_manifest_sha256": qualification_sha256,
         "candidate_validation_sha256": candidate_sha256,
         "image_attestation": attestation,

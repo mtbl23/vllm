@@ -27,8 +27,10 @@ Create an owner-only change record outside the repository. Record:
 - absolute path and SHA-256 of the candidate `release-manifest.json`
 - old service endpoint, health URL, image or artifact identity, and start command
 - new service endpoint and health URL
-- Cloudflare zone ID, DNS record ID, old tunnel UUID, and candidate tunnel UUID
-- owner-only Cloudflare API token file with DNS Edit permission only
+- Cloudflare account ID, zone ID, DNS record ID, old tunnel UUID, and candidate
+  tunnel UUID
+- owner-only Cloudflare proof token file with DNS Read and Cloudflare Tunnel Read
+  permissions, plus a separate DNS Edit token used only for the route switch
 - owner-only Access Client ID, Access Client Secret, and vLLM API key files
 - operator and UTC start time
 
@@ -90,6 +92,7 @@ uv run --script tools/verse/bind_sm120_candidate_release.py \
 VERSE_VLLM_CONTAINER_ID="$EXACT_CANDIDATE_CONTAINER_ID" \
 VERSE_VLLM_RELEASE_MANIFEST="$CANDIDATE_RELEASE_MANIFEST" \
 VERSE_VLLM_API_KEY_FILE="$VLLM_API_KEY_FILE" \
+VERSE_VLLM_GITHUB_TOKEN_FILE="$VERSE_VLLM_GITHUB_TOKEN_FILE" \
   tools/verse/run_sm120_gateway.sh
 curl --noproxy '*' --fail --silent --show-error "$NEW_HEALTH_URL"
 curl --noproxy '*' --fail --silent --show-error "$OLD_HEALTH_URL"
@@ -117,29 +120,19 @@ uv run --script tools/verse/verify_sm120_public_gateway.py \
   --model verse-free \
   --target-mode qualified-candidate \
   --target-tunnel "$NEW_TUNNEL_ID" \
+  --account-id "$CF_ACCOUNT_ID" \
   --zone-id "$CF_ZONE_ID" \
   --record-id "$CF_CANDIDATE_PROOF_RECORD_ID" \
+  --stable-record-id "$CF_FREE_DNS_RECORD_ID" \
   --hostname "$CANDIDATE_PROOF_HOSTNAME" \
+  --production-hostname "$STABLE_FREE_HOSTNAME" \
+  --expected-current-tunnel "$OLD_TUNNEL_ID" \
   --cloudflare-api-token-file "$CF_DNS_READ_TOKEN_FILE" \
   --release-manifest "$CANDIDATE_RELEASE_MANIFEST" \
   --api-key-file "$VLLM_API_KEY_FILE" \
   --access-client-id-file "$ACCESS_CLIENT_ID_FILE" \
   --access-client-secret-file "$ACCESS_CLIENT_SECRET_FILE" \
   >"$CHANGE_RECORD_DIR/candidate-public-proof.json"
-
-uv run --script tools/verse/verify_sm120_public_gateway.py \
-  --endpoint "$OLD_ACCESS_ORIGIN" \
-  --model verse-free \
-  --target-mode recorded-rollback \
-  --target-tunnel "$OLD_TUNNEL_ID" \
-  --zone-id "$CF_ZONE_ID" \
-  --record-id "$CF_ROLLBACK_PROOF_RECORD_ID" \
-  --hostname "$ROLLBACK_PROOF_HOSTNAME" \
-  --cloudflare-api-token-file "$CF_DNS_READ_TOKEN_FILE" \
-  --api-key-file "$OLD_VLLM_API_KEY_FILE" \
-  --access-client-id-file "$ACCESS_CLIENT_ID_FILE" \
-  --access-client-secret-file "$ACCESS_CLIENT_SECRET_FILE" \
-  >"$CHANGE_RECORD_DIR/old-public-proof.json"
 
 uv run --script tools/verse/switch_sm120_cloudflare_route.py inspect \
   --zone-id "$CF_ZONE_ID" \
@@ -153,9 +146,11 @@ The public-route proof must show that an unauthenticated request is rejected,
 all four required API paths work, and vLLM lifecycle, documentation, metrics,
 and invocation routes all return 404 through the public origin. Create
 `CHANGE_RECORD_DIR` with mode 0700 under the operator account, set `umask 077`,
-and require both proof files to be owned by that account and not writable by
+and require every proof file to be owned by that account and not writable by
 group or other users. The candidate proof must also match all immutable
-identity headers emitted by the exact qualified gateway.
+identity headers emitted by the exact qualified gateway. Its exact proof and
+production ingress rules must be the first matching Cloudflare rules, and the
+proof binds the stable DNS record's current tunnel and `modified_on` value.
 
 ## Cutover
 
@@ -175,6 +170,8 @@ identity headers emitted by the exact qualified gateway.
      --target-proof-zone-id "$CF_ZONE_ID" \
      --target-proof-record-id "$CF_CANDIDATE_PROOF_RECORD_ID" \
      --target-proof-hostname "$CANDIDATE_PROOF_HOSTNAME" \
+     --target-proof-account-id "$CF_ACCOUNT_ID" \
+     --target-proof-api-token-file "$CF_DNS_READ_TOKEN_FILE" \
      --api-token-file "$CF_DNS_EDIT_TOKEN_FILE" \
      --receipt "$CHANGE_RECORD_DIR/cutover-route.json" \
      --lock "$CHANGE_RECORD_DIR/free-route.lock" \
@@ -214,7 +211,30 @@ Do not diagnose in place while users remain routed to a failing candidate.
 
 ## Rollback
 
-1. Execute the inverse exact-ID switch once:
+1. After cutover, create a fresh rollback proof. A pre-cutover proof is
+   intentionally invalid because it cannot bind the new stable-route state:
+
+   ```bash
+   uv run --script tools/verse/verify_sm120_public_gateway.py \
+     --endpoint "$OLD_ACCESS_ORIGIN" \
+     --model verse-free \
+     --target-mode recorded-rollback \
+     --target-tunnel "$OLD_TUNNEL_ID" \
+     --account-id "$CF_ACCOUNT_ID" \
+     --zone-id "$CF_ZONE_ID" \
+     --record-id "$CF_ROLLBACK_PROOF_RECORD_ID" \
+     --stable-record-id "$CF_FREE_DNS_RECORD_ID" \
+     --hostname "$ROLLBACK_PROOF_HOSTNAME" \
+     --production-hostname "$STABLE_FREE_HOSTNAME" \
+     --expected-current-tunnel "$NEW_TUNNEL_ID" \
+     --cloudflare-api-token-file "$CF_DNS_READ_TOKEN_FILE" \
+     --api-key-file "$OLD_VLLM_API_KEY_FILE" \
+     --access-client-id-file "$ACCESS_CLIENT_ID_FILE" \
+     --access-client-secret-file "$ACCESS_CLIENT_SECRET_FILE" \
+     >"$CHANGE_RECORD_DIR/old-public-proof.json"
+   ```
+
+2. Execute the inverse exact-ID switch once:
 
    ```bash
    uv run --script tools/verse/switch_sm120_cloudflare_route.py switch \
@@ -228,18 +248,20 @@ Do not diagnose in place while users remain routed to a failing candidate.
      --target-proof-zone-id "$CF_ZONE_ID" \
      --target-proof-record-id "$CF_ROLLBACK_PROOF_RECORD_ID" \
      --target-proof-hostname "$ROLLBACK_PROOF_HOSTNAME" \
+     --target-proof-account-id "$CF_ACCOUNT_ID" \
+     --target-proof-api-token-file "$CF_DNS_READ_TOKEN_FILE" \
      --api-token-file "$CF_DNS_EDIT_TOKEN_FILE" \
      --receipt "$CHANGE_RECORD_DIR/rollback-route.json" \
      --lock "$CHANGE_RECORD_DIR/free-route.lock" \
      --apply
    ```
 
-2. Require the command's verified readback and owner-only receipt.
-3. Send one authenticated synthetic canary through the public Verse Free path.
-4. Confirm the old service receives requests and the candidate drains to zero
+3. Require the command's verified readback and owner-only receipt.
+4. Send one authenticated synthetic canary through the public Verse Free path.
+5. Confirm the old service receives requests and the candidate drains to zero
    running and waiting requests.
-5. Record the trigger, UTC time, route readback, and both service identities.
-6. Leave both services and all evidence intact for diagnosis.
+6. Record the trigger, UTC time, route readback, and both service identities.
+7. Leave both services and all evidence intact for diagnosis.
 
 Rollback never means changing the candidate image, model tree, launch flags, or
 container in place. It means routing back to the already healthy old service.

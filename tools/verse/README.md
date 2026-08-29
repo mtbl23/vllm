@@ -124,6 +124,7 @@ Start the gateway only after the launcher has returned the immutable
 export VERSE_VLLM_CONTAINER_ID='<exact-container-id>'
 export VERSE_VLLM_RELEASE_MANIFEST='<absolute-qualified-release-manifest>'
 export VERSE_VLLM_API_KEY_FILE='<absolute-owner-only-vllm-key-file>'
+export VERSE_VLLM_GITHUB_TOKEN_FILE='<absolute-owner-only-github-token-file>'
 tools/verse/run_sm120_gateway.sh
 ```
 
@@ -154,6 +155,15 @@ publishes both the bundle and an exact-policy verification result beside the
 image identity receipt. Version-only appliance additions are installed from
 `requirements/verse-sm120-runtime.lock` with hashes and without dependency
 resolution; the pre-existing image dependency set is checked afterward.
+
+The release boundary trusts the Verse operator and root account on the
+qualification and candidate hosts. GitHub attestation cryptographically binds
+the immutable image to the exact hosted build workflow and source commit, but
+consumer RTX hardware does not provide remote attestation for the benchmark or
+GPU identity. Those measurements are operator-attested and tamper-evident
+against accidental drift or an unprivileged process, not proof against a
+malicious trusted root. This boundary must not be described as hardware-backed
+remote attestation.
 
 ## Verification
 
