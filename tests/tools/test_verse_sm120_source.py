@@ -6,8 +6,12 @@ import io
 import os
 import shutil
 import subprocess
+import sys
 import tarfile
+import types
 from pathlib import Path
+
+import pytest
 
 SOURCE = Path(__file__).parents[2] / "tools" / "verse" / "verify_sm120_source.sh"
 BUILD = Path(__file__).parents[2] / "tools" / "verse" / "build_sm120_image.sh"
@@ -378,3 +382,48 @@ def test_verse_wheel_omits_the_unused_bundled_flash_attention_matrix():
     assert "if not envs.VLLM_VERSE_RUNTIME_STRICT:" in fa_utils
     assert "CUDA FlashAttention is unavailable in this vLLM build" in fa_utils
     assert "return _CUDA_FLASH_ATTN_AVAILABLE" in fa_utils
+
+
+def test_verse_cuda_imports_without_bundled_flash_attention(monkeypatch):
+    root = SOURCE.parents[2]
+    source = (
+        root / "vllm" / "v1" / "attention" / "backends" / "fa_utils.py"
+    ).read_text()
+
+    vllm = types.ModuleType("vllm")
+    vllm.__path__ = []  # type: ignore[attr-defined]
+    envs = types.ModuleType("vllm.envs")
+    envs.VLLM_VERSE_RUNTIME_STRICT = True  # type: ignore[attr-defined]
+    logger = types.ModuleType("vllm.logger")
+    logger.init_logger = lambda _name: types.SimpleNamespace(  # type: ignore[attr-defined]
+        warning_once=lambda *_args, **_kwargs: None,
+        info_once=lambda *_args, **_kwargs: None,
+        error=lambda *_args, **_kwargs: None,
+    )
+    platforms = types.ModuleType("vllm.platforms")
+    platforms.current_platform = types.SimpleNamespace(  # type: ignore[attr-defined]
+        is_cuda=lambda: True,
+        is_xpu=lambda: False,
+        is_rocm=lambda: False,
+    )
+    custom_ops = types.ModuleType("vllm._custom_ops")
+    custom_ops.reshape_and_cache_flash = object()  # type: ignore[attr-defined]
+    vllm.envs = envs  # type: ignore[attr-defined]
+
+    for name, module in {
+        "vllm": vllm,
+        "vllm.envs": envs,
+        "vllm.logger": logger,
+        "vllm.platforms": platforms,
+        "vllm._custom_ops": custom_ops,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.delitem(sys.modules, "vllm.vllm_flash_attn", raising=False)
+
+    module = types.ModuleType("verse_test_fa_utils")
+    exec(compile(source, "fa_utils.py", "exec"), module.__dict__)
+
+    assert not module.is_flash_attn_varlen_func_available()
+    assert module.get_flash_attn_version() is None
+    with pytest.raises(ImportError, match="configured FlashInfer"):
+        module.flash_attn_varlen_func()
