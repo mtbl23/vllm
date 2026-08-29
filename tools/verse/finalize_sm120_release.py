@@ -1252,7 +1252,7 @@ def validate_warm_latency(payload: dict[str, Any]) -> None:
 
 def validate_churn(payload: dict[str, Any]) -> None:
     require(payload.get("status") == "pass", "churn did not pass")
-    require(float(payload.get("duration_seconds", 0)) >= 900, "churn was too short")
+    require(float(payload.get("duration_seconds", 0)) >= 7200, "churn was too short")
     require(
         int(payload.get("concurrency", -1)) == EXPECTED_CONCURRENCY,
         "churn used wrong concurrency",

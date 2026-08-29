@@ -179,7 +179,7 @@ The first-release gates are:
 - at least 30 percent improvement on the production-weighted 1K/5.5K mix
 - 38 active slots without preemption, OOM, restart, or request loss
 - no material output divergence beyond the accepted NVFP4 KV tolerance
-- no crash or cache corruption during the separate 15-minute heavy churn gate
+- no crash or cache corruption during the separate two-hour heavy churn gate
 
 The old Triton INT4 measurements were 895 tok/s at 1K and 734.7 tok/s at 5.5K
 with 40 active requests. The acceptance evaluator checks both scenario medians
@@ -187,7 +187,7 @@ and the mean relative improvement across the two legacy baselines. Missing any
 gate keeps the old image in service.
 
 For a complete release decision, run the wrapper below. It performs the short
-matrix, the fixed 15-minute heavy churn gate, a second complete chat-contract check,
+matrix, the fixed two-hour heavy churn gate, a second complete chat-contract check,
 and proves from Docker state that the same immutable container remained alive
 without a restart for the whole campaign:
 

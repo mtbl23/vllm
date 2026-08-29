@@ -480,7 +480,7 @@ def churn() -> dict:
     return {
         "status": "pass",
         **qualification_identity(),
-        "duration_seconds": 901,
+        "duration_seconds": 7201,
         "concurrency": 38,
         "prompt_pool_size": 64,
         "completed_requests": 100,
@@ -861,6 +861,16 @@ def test_release_finalizer_rejects_churn_preemption(tmp_path: Path):
         assert "preempted" in str(exc)
     else:
         raise AssertionError("preempting churn was accepted")
+
+
+def test_release_finalizer_rejects_churn_shorter_than_two_hours(tmp_path: Path):
+    release = release_tree(tmp_path)
+    payload = churn()
+    payload["duration_seconds"] = 7199
+    write_json(release / "churn.json", payload)
+
+    with pytest.raises(ValueError, match="churn was too short"):
+        MODULE.finalize(release)
 
 
 def test_release_finalizer_rejects_b01_identity_drift(tmp_path: Path):

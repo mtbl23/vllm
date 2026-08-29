@@ -147,7 +147,7 @@ uv run --script "$ROOT/tools/verse/run_sm120_churn.py" \
   --endpoint "$ENDPOINT" \
   --model verse-free \
   --api-key-file "$VERSE_VLLM_API_KEY_FILE" \
-  --duration-seconds 900 \
+  --duration-seconds 7200 \
   --concurrency 38 \
   --prompt-pool-size 64 \
   "${IDENTITY_ARGS[@]}" \
