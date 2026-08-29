@@ -60,11 +60,13 @@ jobs:
         env:
           VERSE_VLLM_BUILD_OUTPUT: push
           VERSE_VLLM_IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/verse-vllm
-        run: tools/verse/build_sm120_image.sh | tee verse-sm120-image.txt
+        run: |
+          set -o pipefail
+          tools/verse/build_sm120_image.sh | tee "$RUNNER_TEMP/verse-sm120-image.txt"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: verse-sm120-image-${{ github.sha }}
-          path: verse-sm120-image.txt
+          path: ${{ runner.temp }}/verse-sm120-image.txt
           if-no-files-found: error
           retention-days: 30
