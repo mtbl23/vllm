@@ -25,11 +25,14 @@ PYTHON_FILES=(
   tests/tools/test_verse_sm120_profile.py
   tests/tools/test_verse_sm120_release.py
   tests/tools/test_verse_sm120_source.py
+  tests/tools/test_verse_sm120_vast_outer.py
   tests/v1/attention/test_gemma4_nvfp4_flashinfer_routing.py
   tests/v1/attention/test_nvfp4_flashinfer_vosplit.py
   tools/verse/prepare_sm120_model.py
+  tools/verse/bind_sm120_candidate_release.py
   tools/verse/build_sm120_wheel_identity.py
   tools/verse/finalize_sm120_release.py
+  tools/verse/finalize_sm120_vast_outer_release.py
   tools/verse/evaluate_sm120_acceptance.py
   tools/verse/check_sm120_chat_contract.py
   tools/verse/download_sm120_model.py
@@ -37,9 +40,13 @@ PYTHON_FILES=(
   tools/verse/run_sm120_queue_stress.py
   tools/verse/run_sm120_user_latency.py
   tools/verse/run_sm120_warm_latency.py
+  tools/verse/probe_sm120_outer_auth.py
+  tools/verse/run_sm120_vast_outer.py
+  tools/verse/snapshot_sm120_vast_outer.py
   tools/verse/sm120_evidence_identity.py
   tools/verse/sm120_image_receipt.py
   tools/verse/validate_sm120_container.py
+  tools/verse/validate_sm120_gateway_release.py
   tools/verse/validate_sm120_profile.py
   tools/verse/verify_sm120_image.py
   tools/verse/switch_sm120_cloudflare_route.py
@@ -72,7 +79,8 @@ uv run --no-project --with pytest==9.1.0 --with fastapi==0.135.1 \
   tests/tools/test_verse_sm120_auth.py \
   tests/tools/test_verse_sm120_acceptance.py \
   tests/tools/test_verse_sm120_chat_contract.py \
-  tests/tools/test_verse_sm120_churn.py
+  tests/tools/test_verse_sm120_churn.py \
+  tests/tools/test_verse_sm120_vast_outer.py
 uv run --no-project --with pytest==9.1.0 python -m pytest -q \
   --confcutdir=tests/benchmarks \
   tests/benchmarks/test_verse_sm120_b01.py \

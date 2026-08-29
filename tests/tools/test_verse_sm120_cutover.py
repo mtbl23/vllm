@@ -14,12 +14,15 @@ import pytest
 
 ROOT = Path(__file__).parents[2]
 CADDYFILE = ROOT / "tools" / "verse" / "verse-sm120-gateway.Caddyfile"
+GATEWAY_RUNNER = ROOT / "tools" / "verse" / "run_sm120_gateway.sh"
+ATTESTATION_VERIFIER = ROOT / "tools" / "verse" / "verify_sm120_attestation.sh"
 DUAL_CADDYFILE = ROOT / "tools" / "verse" / "verse-sm120-dual-gateway.Caddyfile"
 DUAL_LAUNCHER = ROOT / "tools" / "verse" / "run_sm120_dual_gateway.sh"
 DUAL_VERIFY = ROOT / "tools" / "verse" / "verify_sm120_dual_gateway.py"
 ROUTE_PATH = ROOT / "tools" / "verse" / "switch_sm120_cloudflare_route.py"
 PUBLIC_PATH = ROOT / "tools" / "verse" / "verify_sm120_public_gateway.py"
 VALIDATE_PATH = ROOT / "tools" / "verse" / "validate_sm120_gateway_release.py"
+BIND_PATH = ROOT / "tools" / "verse" / "bind_sm120_candidate_release.py"
 sys.path.insert(0, str(ROUTE_PATH.parent))
 
 FORK_COMMIT = "b" * 40
@@ -27,6 +30,10 @@ IMAGE_DIGEST = f"registry/runtime@sha256:{'a' * 64}"
 CONTAINER_ID = "c" * 64
 RELEASE_NONCE = "d" * 64
 MODEL_REVISION = "e2c6cd9c3302e91c032a378a607009c82ba16fac"
+ATTESTATION_SHA256 = "f" * 64
+PROOF_ZONE_ID = "1" * 32
+PROOF_RECORD_ID = "2" * 32
+PROOF_HOSTNAME = "candidate-proof.verse-rp.com"
 
 
 def _load(name: str, path: Path):
@@ -41,6 +48,7 @@ route = _load("switch_sm120_cloudflare_route", ROUTE_PATH)
 public = _load("verify_sm120_public_gateway", PUBLIC_PATH)
 dual = _load("verify_sm120_dual_gateway", DUAL_VERIFY)
 release = _load("validate_sm120_gateway_release", VALIDATE_PATH)
+binder = _load("bind_sm120_candidate_release", BIND_PATH)
 
 
 def _release_manifest() -> dict:
@@ -51,6 +59,14 @@ def _release_manifest() -> dict:
         "source_commit": FORK_COMMIT,
         "model_revision": MODEL_REVISION,
         "release_nonce": RELEASE_NONCE,
+        "image_attestation": {
+            "image_repository": "registry/runtime",
+            "image_sha256": "a" * 64,
+            "source_commit": FORK_COMMIT,
+            "signer_workflow": ".github/workflows/verse-sm120-image.yml",
+            "source_ref": "refs/heads/verse/v0.28-sm120-nvfp4-fa2",
+            "verification_sha256": ATTESTATION_SHA256,
+        },
         "container": {"id": CONTAINER_ID, "image_digest": IMAGE_DIGEST},
     }
 
@@ -73,6 +89,16 @@ def _write_target_binding(tmp_path: Path, target_tunnel: str) -> tuple[Path, Pat
                 "fork_commit": FORK_COMMIT,
                 "model_revision": MODEL_REVISION,
                 "release_nonce": RELEASE_NONCE,
+                "attestation_verification_sha256": ATTESTATION_SHA256,
+                "dns_binding": {
+                    "zone_id": PROOF_ZONE_ID,
+                    "record_id": PROOF_RECORD_ID,
+                    "hostname": PROOF_HOSTNAME,
+                    "record_type": "CNAME",
+                    "proxied": True,
+                    "content": f"{target_tunnel}.cfargotunnel.com",
+                    "modified_on": "2026-08-29T00:00:00Z",
+                },
             },
             sort_keys=True,
         )
@@ -97,8 +123,91 @@ def test_caddy_gateway_has_exact_allowlist_and_no_management_routes():
         "X-Verse-Model-Revision",
         "X-Verse-Release-Nonce",
         "X-Verse-Release-Manifest-Sha256",
+        "X-Verse-Attestation-Verification-Sha256",
     ):
         assert text.count(header) == 4
+
+
+def test_gateway_is_bound_to_exact_candidate_network_namespace():
+    text = GATEWAY_RUNNER.read_text()
+
+    assert '--network "container:$VLLM_CONTAINER_ID"' in text
+    assert "--network host" not in text
+    assert "docker update --restart" not in text
+    assert "--restart no" in text
+    assert '{"8000/tcp", "8080/tcp"}' in text
+    assert "candidate must publish only 127.0.0.1:8080 for its gateway" in text
+    assert "vLLM API key file must be caller-owned with exact mode 0600" in text
+
+
+def test_attestation_verifier_uses_exact_github_policy():
+    text = ATTESTATION_VERIFIER.read_text()
+
+    assert 'gh attestation verify "oci://$IMAGE"' in text
+    assert "--repo mtbl23/vllm" in text
+    assert (
+        "https://github.com/mtbl23/vllm/.github/workflows/verse-sm120-image.yml" in text
+    )
+    assert "--source-ref refs/heads/verse/v0.28-sm120-nvfp4-fa2" in text
+    assert '--source-digest "$COMMIT"' in text
+    assert "--deny-self-hosted-runners" in text
+    assert "--format json" in text
+
+
+def test_public_proof_reads_exact_cloudflare_dns_binding(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    tunnel = "11111111-2222-3333-4444-555555555555"
+    payload = {
+        "success": True,
+        "result": {
+            "id": PROOF_RECORD_ID,
+            "type": "CNAME",
+            "name": PROOF_HOSTNAME,
+            "content": f"{tunnel}.cfargotunnel.com",
+            "proxied": True,
+            "modified_on": "2026-08-29T00:00:00Z",
+        },
+    }
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, size):
+            del size
+            return json.dumps(payload).encode()
+
+    class Opener:
+        def open(self, request, timeout):
+            assert request.full_url.endswith(
+                f"/zones/{PROOF_ZONE_ID}/dns_records/{PROOF_RECORD_ID}"
+            )
+            assert timeout == 20
+            return Response()
+
+    monkeypatch.setattr(public.urllib.request, "build_opener", lambda *args: Opener())
+    binding = public._cloudflare_dns_binding(
+        zone_id=PROOF_ZONE_ID,
+        record_id=PROOF_RECORD_ID,
+        hostname=PROOF_HOSTNAME,
+        target_tunnel=tunnel,
+        token="secret",
+    )
+
+    assert binding["content"] == f"{tunnel}.cfargotunnel.com"
+    payload["result"]["content"] = "other.cfargotunnel.com"
+    with pytest.raises(RuntimeError, match="does not target the requested tunnel"):
+        public._cloudflare_dns_binding(
+            zone_id=PROOF_ZONE_ID,
+            record_id=PROOF_RECORD_ID,
+            hostname=PROOF_HOSTNAME,
+            target_tunnel=tunnel,
+            token="secret",
+        )
 
 
 def test_dual_gateway_is_loopback_sticky_and_fail_closed():
@@ -266,6 +375,12 @@ def test_cloudflare_route_reserves_receipt_and_rechecks_before_patch(
             str(proof),
             "--target-mode",
             "qualified-candidate",
+            "--target-proof-zone-id",
+            PROOF_ZONE_ID,
+            "--target-proof-record-id",
+            PROOF_RECORD_ID,
+            "--target-proof-hostname",
+            PROOF_HOSTNAME,
             "--apply",
         ],
     )
@@ -291,6 +406,9 @@ def test_target_binding_rejects_proof_for_another_manifest(tmp_path: Path):
             proof_path=proof,
             target_tunnel=tunnel,
             target_mode="qualified-candidate",
+            proof_zone_id=PROOF_ZONE_ID,
+            proof_record_id=PROOF_RECORD_ID,
+            proof_hostname=PROOF_HOSTNAME,
         )
 
 
@@ -307,6 +425,14 @@ def test_recorded_rollback_requires_fresh_public_service_proof(tmp_path: Path):
                 "endpoint": "https://old-candidate.example.com",
                 "model": "verse-free",
                 "release_manifest_sha256": None,
+                "dns_binding": {
+                    "zone_id": PROOF_ZONE_ID,
+                    "record_id": PROOF_RECORD_ID,
+                    "hostname": PROOF_HOSTNAME,
+                    "record_type": "CNAME",
+                    "proxied": True,
+                    "content": f"{tunnel}.cfargotunnel.com",
+                },
             }
         )
     )
@@ -315,6 +441,9 @@ def test_recorded_rollback_requires_fresh_public_service_proof(tmp_path: Path):
         manifest_path=None,
         proof_path=proof.resolve(),
         target_tunnel=tunnel,
+        proof_zone_id=PROOF_ZONE_ID,
+        proof_record_id=PROOF_RECORD_ID,
+        proof_hostname=PROOF_HOSTNAME,
     )
     assert binding["target_mode"] == "recorded-rollback"
     assert binding["model"] == "verse-free"
@@ -326,6 +455,16 @@ def test_deployment_state_rejects_group_writable_parent(tmp_path: Path):
     parent.chmod(0o770)
 
     with pytest.raises(ValueError, match="group/world writable"):
+        route._reserve_receipt(parent / "receipt.json", {"status": "pending"})
+
+
+def test_deployment_state_rejects_group_writable_ancestor(tmp_path: Path):
+    ancestor = tmp_path / "unsafe-ancestor"
+    parent = ancestor / "safe-parent"
+    parent.mkdir(parents=True, mode=0o700)
+    ancestor.chmod(0o770)
+
+    with pytest.raises(ValueError, match="ancestry is group/world writable"):
         route._reserve_receipt(parent / "receipt.json", {"status": "pending"})
 
 
@@ -342,12 +481,59 @@ def test_release_manifest_binds_exact_candidate(tmp_path: Path):
 
     assert len(digest) == 64
     assert identity["candidate_container_id"] == CONTAINER_ID
+    assert identity["attestation_verification_sha256"] == ATTESTATION_SHA256
     with pytest.raises(ValueError, match="wrong container"):
         release.validate(
             payload,
             container_id="e" * 64,
             image_digest=IMAGE_DIGEST,
             fork_commit=FORK_COMMIT,
+        )
+
+
+def test_candidate_binding_requires_passed_image_qualification():
+    qualification = {
+        "status": "pass",
+        "scope": "disposable_image_qualification",
+        "profile": "sm120-gemma4-nvfp4-v4",
+        "image_digest": IMAGE_DIGEST,
+        "source_commit": FORK_COMMIT,
+        "model_revision": MODEL_REVISION,
+        "image_attestation": _release_manifest()["image_attestation"],
+        "b01": {"status": "pass"},
+    }
+    candidate = {
+        "status": "valid",
+        "container_id": CONTAINER_ID,
+        "image_digest": IMAGE_DIGEST,
+        "fork_commit": FORK_COMMIT,
+        "model_revision": MODEL_REVISION,
+        "gateway_host_port": 8080,
+        "restart_policy": "no",
+    }
+
+    result = binder.bind(
+        qualification,
+        "1" * 64,
+        candidate,
+        "2" * 64,
+        container_id=CONTAINER_ID,
+        image=IMAGE_DIGEST,
+        commit=FORK_COMMIT,
+    )
+
+    assert result["scope"] == "pre_cutover_candidate_binding"
+    assert result["qualification_manifest_sha256"] == "1" * 64
+    assert result["candidate_validation_sha256"] == "2" * 64
+    with pytest.raises(ValueError, match="candidate validation drifted"):
+        binder.bind(
+            qualification,
+            "1" * 64,
+            {**candidate, "restart_policy": "unless-stopped"},
+            "2" * 64,
+            container_id=CONTAINER_ID,
+            image=IMAGE_DIGEST,
+            commit=FORK_COMMIT,
         )
 
 

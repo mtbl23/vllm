@@ -26,6 +26,39 @@ def require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
+def validate_owned_ancestry(path: Path) -> None:
+    parent = path.parent
+    parent_metadata = parent.stat()
+    require(parent.resolve(strict=True) == parent, "release parent must be canonical")
+    require(
+        parent_metadata.st_uid == os.geteuid(),
+        "release parent has the wrong owner",
+    )
+    require(
+        not stat.S_IMODE(parent_metadata.st_mode) & (stat.S_IWGRP | stat.S_IWOTH),
+        "release parent must not be group/world writable",
+    )
+    for ancestor in (parent, *parent.parents):
+        require(not ancestor.is_symlink(), "release ancestry contains a symlink")
+        metadata = ancestor.stat()
+        require(
+            metadata.st_uid in (0, os.geteuid()),
+            "release ancestry has an untrusted owner",
+        )
+        mode = stat.S_IMODE(metadata.st_mode)
+        writable = mode & (stat.S_IWGRP | stat.S_IWOTH)
+        sticky_root = (
+            ancestor != parent
+            and metadata.st_uid == 0
+            and bool(mode & stat.S_ISVTX)
+            and bool(mode & stat.S_IWOTH)
+        )
+        require(
+            not writable or sticky_root,
+            "release ancestry is group/world writable",
+        )
+
+
 def load_owned_file(path: Path) -> tuple[dict, str]:
     require(
         path.is_absolute() and path.is_file(),
@@ -43,20 +76,7 @@ def load_owned_file(path: Path) -> tuple[dict, str]:
         not stat.S_IMODE(metadata.st_mode) & (stat.S_IWGRP | stat.S_IWOTH),
         "release manifest must not be group/world writable",
     )
-    parent = path.parent
-    parent_metadata = parent.stat()
-    require(
-        parent.resolve(strict=True) == parent,
-        "release manifest parent must be canonical",
-    )
-    require(
-        parent_metadata.st_uid == os.geteuid(),
-        "release manifest parent has the wrong owner",
-    )
-    require(
-        not stat.S_IMODE(parent_metadata.st_mode) & (stat.S_IWGRP | stat.S_IWOTH),
-        "release manifest parent must not be group/world writable",
-    )
+    validate_owned_ancestry(path)
     raw = path.read_bytes()
     payload = json.loads(raw)
     require(isinstance(payload, dict), "release manifest is not an object")
@@ -71,10 +91,26 @@ def validate(
     fork_commit: str,
 ) -> dict[str, str]:
     require(payload.get("status") == "pass", "release manifest did not pass")
+    scope = payload.get("scope")
     require(
-        payload.get("scope") == "pre_cutover_candidate_qualification",
+        scope
+        in {
+            "pre_cutover_candidate_qualification",
+            "pre_cutover_candidate_binding",
+        },
         "release manifest has the wrong scope",
     )
+    if scope == "pre_cutover_candidate_binding":
+        require(
+            HEX64.fullmatch(str(payload.get("qualification_manifest_sha256", "")))
+            is not None,
+            "release manifest has an invalid qualification hash",
+        )
+        require(
+            HEX64.fullmatch(str(payload.get("candidate_validation_sha256", "")))
+            is not None,
+            "release manifest has an invalid candidate validation hash",
+        )
     require(
         payload.get("profile") == EXPECTED_PROFILE["VERSE_RUNTIME_PROFILE"],
         "release manifest has the wrong profile",
@@ -87,6 +123,12 @@ def validate(
         payload.get("model_revision") == EXPECTED_PROFILE["VERSE_MODEL_REVISION"],
         "release manifest has the wrong model revision",
     )
+    attestation = payload.get("image_attestation")
+    require(isinstance(attestation, dict), "release manifest lacks image attestation")
+    require(
+        HEX64.fullmatch(str(attestation.get("verification_sha256", ""))) is not None,
+        "release manifest has an invalid attestation verification hash",
+    )
     nonce = str(payload.get("release_nonce", ""))
     require(HEX64.fullmatch(nonce) is not None, "release manifest has a bad nonce")
     container = payload.get("container")
@@ -98,12 +140,26 @@ def validate(
         container.get("image_digest") == image_digest,
         "release manifest has the wrong image",
     )
+    image_repository, image_sha256 = image_digest.rsplit("@sha256:", 1)
+    expected_attestation = {
+        "image_repository": image_repository,
+        "image_sha256": image_sha256,
+        "source_commit": fork_commit,
+        "signer_workflow": ".github/workflows/verse-sm120-image.yml",
+        "source_ref": "refs/heads/verse/v0.28-sm120-nvfp4-fa2",
+    }
+    for name, expected in expected_attestation.items():
+        require(
+            attestation.get(name) == expected,
+            f"release manifest has the wrong attestation {name}",
+        )
     return {
         "candidate_container_id": container_id,
         "image_digest": image_digest,
         "fork_commit": fork_commit,
         "model_revision": EXPECTED_PROFILE["VERSE_MODEL_REVISION"],
         "release_nonce": nonce,
+        "attestation_verification_sha256": str(attestation["verification_sha256"]),
     }
 
 

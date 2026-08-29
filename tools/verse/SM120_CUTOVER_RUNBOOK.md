@@ -23,6 +23,7 @@ Create an owner-only change record outside the repository. Record:
 - candidate fork commit and Campaign 22 model revision
 - successful GitHub artifact-attestation verification for that exact digest,
   source commit, protected workflow path, and branch ref
+- owner-only GitHub token file used only for artifact-attestation verification
 - absolute path and SHA-256 of the candidate `release-manifest.json`
 - old service endpoint, health URL, image or artifact identity, and start command
 - new service endpoint and health URL
@@ -38,14 +39,16 @@ in the record.
 
 All conditions must be true before routing one production request:
 
-1. `release-manifest.json` has `status: pass` and
-   `scope: pre_cutover_candidate_qualification`.
+1. The candidate binding manifest has `status: pass` and
+   `scope: pre_cutover_candidate_binding`.
 2. The exact image digest has a valid GitHub artifact attestation from
    `.github/workflows/verse-sm120-image.yml`, the expected source commit and
    `refs/heads/verse/v0.28-sm120-nvfp4-fa2`, and a GitHub-hosted runner.
 3. The CUDA, chat-contract, 38-slot, B01, and two-hour heavy churn gates all
-   came from one image digest, fork commit, model revision, exact RTX 5070 Ti,
-   and container with zero restarts.
+   came from one image digest, fork commit, model revision, exact disposable
+   RTX 5070 Ti, and process with zero restarts. The resulting
+   `disposable_image_qualification` manifest is then bound to the exact
+   production candidate container by `bind_sm120_candidate_release.py`.
 4. The old service is healthy and remains running. A fresh public-route proof
    binds its distinct rollback hostname to the recorded old tunnel UUID.
 5. The candidate is on a distinct disposable host and exact GPU UUID, with no
@@ -67,15 +70,23 @@ If any condition is false, stop before cutover.
 Run these checks from the candidate fork's exact clean commit:
 
 ```bash
-gh attestation verify "oci://$VERSE_VLLM_IMAGE" \
-  --repo mtbl23/vllm \
-  --signer-workflow \
-    https://github.com/mtbl23/vllm/.github/workflows/verse-sm120-image.yml \
-  --source-ref refs/heads/verse/v0.28-sm120-nvfp4-fa2 \
-  --source-digest "$VERSE_VLLM_EXPECTED_COMMIT" \
-  --deny-self-hosted-runners
+umask 077
+export VERSE_VLLM_GITHUB_TOKEN_FILE=\
+"$CHANGE_RECORD_DIR/github-attestation-token"
+VERSE_VLLM_ATTESTATION_VERIFICATION_OUTPUT=\
+"$CHANGE_RECORD_DIR/image-attestation-verification.json" \
+  tools/verse/verify_sm120_attestation.sh
 tools/verse/verify_sm120_source.sh "$VERSE_VLLM_EXPECTED_COMMIT"
 tools/verse/check_sm120_server.sh
+VERSE_VLLM_VALIDATION_OUTPUT="$CHANGE_RECORD_DIR/candidate-validation.json" \
+  tools/verse/check_sm120_server.sh
+uv run --script tools/verse/bind_sm120_candidate_release.py \
+  --qualification-manifest "$IMAGE_QUALIFICATION_MANIFEST" \
+  --candidate-validation "$CHANGE_RECORD_DIR/candidate-validation.json" \
+  --container-id "$EXACT_CANDIDATE_CONTAINER_ID" \
+  --image "$VERSE_VLLM_IMAGE" \
+  --expected-commit "$VERSE_VLLM_EXPECTED_COMMIT" \
+  >"$CANDIDATE_RELEASE_MANIFEST"
 VERSE_VLLM_CONTAINER_ID="$EXACT_CANDIDATE_CONTAINER_ID" \
 VERSE_VLLM_RELEASE_MANIFEST="$CANDIDATE_RELEASE_MANIFEST" \
 VERSE_VLLM_API_KEY_FILE="$VLLM_API_KEY_FILE" \
@@ -106,6 +117,10 @@ uv run --script tools/verse/verify_sm120_public_gateway.py \
   --model verse-free \
   --target-mode qualified-candidate \
   --target-tunnel "$NEW_TUNNEL_ID" \
+  --zone-id "$CF_ZONE_ID" \
+  --record-id "$CF_CANDIDATE_PROOF_RECORD_ID" \
+  --hostname "$CANDIDATE_PROOF_HOSTNAME" \
+  --cloudflare-api-token-file "$CF_DNS_READ_TOKEN_FILE" \
   --release-manifest "$CANDIDATE_RELEASE_MANIFEST" \
   --api-key-file "$VLLM_API_KEY_FILE" \
   --access-client-id-file "$ACCESS_CLIENT_ID_FILE" \
@@ -117,6 +132,10 @@ uv run --script tools/verse/verify_sm120_public_gateway.py \
   --model verse-free \
   --target-mode recorded-rollback \
   --target-tunnel "$OLD_TUNNEL_ID" \
+  --zone-id "$CF_ZONE_ID" \
+  --record-id "$CF_ROLLBACK_PROOF_RECORD_ID" \
+  --hostname "$ROLLBACK_PROOF_HOSTNAME" \
+  --cloudflare-api-token-file "$CF_DNS_READ_TOKEN_FILE" \
   --api-key-file "$OLD_VLLM_API_KEY_FILE" \
   --access-client-id-file "$ACCESS_CLIENT_ID_FILE" \
   --access-client-secret-file "$ACCESS_CLIENT_SECRET_FILE" \
@@ -153,6 +172,9 @@ identity headers emitted by the exact qualified gateway.
      --target-mode qualified-candidate \
      --target-release-manifest "$CANDIDATE_RELEASE_MANIFEST" \
      --target-public-proof "$CHANGE_RECORD_DIR/candidate-public-proof.json" \
+     --target-proof-zone-id "$CF_ZONE_ID" \
+     --target-proof-record-id "$CF_CANDIDATE_PROOF_RECORD_ID" \
+     --target-proof-hostname "$CANDIDATE_PROOF_HOSTNAME" \
      --api-token-file "$CF_DNS_EDIT_TOKEN_FILE" \
      --receipt "$CHANGE_RECORD_DIR/cutover-route.json" \
      --lock "$CHANGE_RECORD_DIR/free-route.lock" \
@@ -203,6 +225,9 @@ Do not diagnose in place while users remain routed to a failing candidate.
      --target-tunnel "$OLD_TUNNEL_ID" \
      --target-mode recorded-rollback \
      --target-public-proof "$CHANGE_RECORD_DIR/old-public-proof.json" \
+     --target-proof-zone-id "$CF_ZONE_ID" \
+     --target-proof-record-id "$CF_ROLLBACK_PROOF_RECORD_ID" \
+     --target-proof-hostname "$ROLLBACK_PROOF_HOSTNAME" \
      --api-token-file "$CF_DNS_EDIT_TOKEN_FILE" \
      --receipt "$CHANGE_RECORD_DIR/rollback-route.json" \
      --lock "$CHANGE_RECORD_DIR/free-route.lock" \

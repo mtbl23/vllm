@@ -63,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--restart-policy",
         choices=("no", "unless-stopped"),
-        default="unless-stopped",
+        default="no",
     )
     return parser.parse_args()
 
@@ -383,18 +383,31 @@ def validate_container(container: dict[str, Any], args: argparse.Namespace) -> d
     validate_mounts(container, args)
     validate_runtime_identity(args)
 
-    bindings = container["NetworkSettings"]["Ports"].get("8000/tcp") or []
-    require(len(bindings) == 1, "container must expose exactly one port binding")
+    ports = container["NetworkSettings"]["Ports"]
+    require(
+        set(ports) == {"8000/tcp", "8080/tcp"},
+        "container must expose only the vLLM and candidate-bound gateway ports",
+    )
+    bindings = ports.get("8000/tcp") or []
+    require(len(bindings) == 1, "container must expose one vLLM port binding")
     binding = bindings[0]
-    require(binding.get("HostIp") == "127.0.0.1", "port is not loopback-only")
+    require(binding.get("HostIp") == "127.0.0.1", "vLLM port is not loopback-only")
     host_port = binding.get("HostPort", "")
     require(host_port.isdigit() and 0 < int(host_port) < 65536, "invalid host port")
+    gateway_bindings = ports.get("8080/tcp") or []
+    require(
+        gateway_bindings == [{"HostIp": "127.0.0.1", "HostPort": "8080"}],
+        "gateway port must be exactly 127.0.0.1:8080",
+    )
 
     return {
         "status": "valid",
         "container_id": args.container_id,
+        "image_digest": args.image,
         "image_id": container["Image"],
         "host_port": int(host_port),
+        "gateway_host_port": 8080,
+        "restart_policy": args.restart_policy,
         "started_at": state["StartedAt"],
         "fork_commit": args.expected_commit,
         "model_revision": EXPECTED_PROFILE["VERSE_MODEL_REVISION"],

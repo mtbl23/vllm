@@ -96,13 +96,14 @@ runtime wheel/native hashes to match that receipt. It runs as root only to
 establish root-owned mount boundaries; the serving process runs as UID 2000/GID
 0 with every Linux capability dropped.
 
-The container first starts with automatic restart disabled. The launcher waits
-for health, checks authenticated model discovery and strict kernel markers, and
-runs both streaming and repeated greedy inference. Only after those checks
-pass does it enable `unless-stopped` restart behavior and print `status=ready`.
+The container starts and remains with automatic restart disabled. The launcher
+waits for health, checks authenticated model discovery and strict kernel
+markers, and runs both streaming and repeated greedy inference before printing
+`status=ready`. A reboot or process failure therefore requires a fresh launch
+and identity validation instead of silently reviving an old qualification.
 A failed startup removes only the newly-created candidate container. The model
 mount remains read-only and its full manifest inventory is rehashed on every
-container start, including Docker-initiated restarts.
+explicit container start.
 
 The launch profile is fixed in `sm120_profile.env`. Capacity or kernel changes
 must create a new profile version rather than silently overriding values.
@@ -128,10 +129,12 @@ tools/verse/run_sm120_gateway.sh
 
 The gateway refuses a mutable or mismatched upstream. The qualified manifest
 must bind the exact 64-character container ID, immutable image digest, fork
-commit, model revision, and release nonce. The candidate must publish exactly
-`127.0.0.1:8000`, and all raw vLLM application routes other than `/health` and
-`/metrics` remain bearer-authenticated even though the public gateway exposes
-neither management surface. Gateway responses include immutable candidate
+commit, model revision, release nonce, and verified image-attestation hash. The
+candidate publishes exactly `127.0.0.1:8000` and `127.0.0.1:8080`. Caddy shares
+the exact candidate container's network namespace, so the host gateway port
+cannot outlive or drift to another vLLM listener. All raw vLLM application
+routes other than `/health` and `/metrics` remain bearer-authenticated even
+though the public gateway exposes neither management surface. Gateway responses include immutable candidate
 identity headers so the Access-protected public proof can bind a tunnel to the
 same qualified process before a route change.
 
@@ -212,8 +215,21 @@ without a restart for the whole campaign:
 
 ```bash
 export VERSE_VLLM_RELEASE_DIR=/var/lib/verse-acceptance/<candidate-id>-release
+export VERSE_VLLM_GITHUB_TOKEN_FILE=/run/verse-secrets/github-attestation-token
 tools/verse/run_sm120_release_gates.sh
 ```
+
+For Vast hosts that run the immutable image as the outer SSH container, use
+`run_sm120_vast_release_gates.sh` against one already-running disposable
+single-RTX-5070-Ti allocation. The driver never changes provider lifecycle or
+opens a public listener. It records exact provider, SSH, process, GPU, image,
+tool, auth, B01, prefill, queue, latency, chat, and two-hour churn evidence and
+emits a `disposable_image_qualification` manifest. Before cutover, launch the
+same digest with `run_sm120_server.sh`, capture a new candidate validation with
+`VERSE_VLLM_VALIDATION_OUTPUT`, and run
+`bind_sm120_candidate_release.py`. The binding manifest ties the proven image
+to the exact production container ID without pretending the disposable process
+is the production process.
 
 The churn phase keeps 38 workers cycling through 64 distinct 1K, 5.5K, and 6K
 prefixes, cancels a deterministic fraction mid-stream, discards all generated

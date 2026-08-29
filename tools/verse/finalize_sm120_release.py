@@ -165,6 +165,7 @@ EXPECTED_ARTIFACT_RELATIVE_PATHS = (
     "container-after-churn.json",
     "candidate-host.json",
     "image-receipt.json",
+    "image-attestation-verification.json",
 )
 ALLOWED_MANIFEST_OUTPUTS = {
     ".release-manifest.tmp",
@@ -1115,6 +1116,39 @@ def validate_image_receipt(
     )
 
 
+def validate_image_attestation(
+    payload: Any, *, container: dict[str, Any]
+) -> dict[str, str]:
+    require(isinstance(payload, list) and payload, "image attestation is absent")
+    config = container.get("Config") or {}
+    labels = config.get("Labels") or {}
+    image = str(config.get("Image", ""))
+    require(IMAGE_DIGEST_RE.fullmatch(image) is not None, "image digest is invalid")
+    image_name, image_sha256 = image.rsplit("@sha256:", 1)
+    commit = str(labels.get("ai.vllm.build.commit", ""))
+    require(SHA256_RE.fullmatch(image_sha256) is not None, "image digest is invalid")
+    require(re.fullmatch(r"[0-9a-f]{40}", commit) is not None, "commit is invalid")
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    require(image_name in serialized, "attestation has the wrong image repository")
+    require(image_sha256 in serialized, "attestation has the wrong image digest")
+    require(commit in serialized, "attestation has the wrong source commit")
+    require(
+        ".github/workflows/verse-sm120-image.yml" in serialized,
+        "attestation has the wrong signer workflow",
+    )
+    require(
+        "refs/heads/verse/v0.28-sm120-nvfp4-fa2" in serialized,
+        "attestation has the wrong source ref",
+    )
+    return {
+        "image_repository": image_name,
+        "image_sha256": image_sha256,
+        "source_commit": commit,
+        "signer_workflow": ".github/workflows/verse-sm120-image.yml",
+        "source_ref": "refs/heads/verse/v0.28-sm120-nvfp4-fa2",
+    }
+
+
 def validate_queue_stress(payload: dict[str, Any]) -> None:
     require(payload.get("status") == "pass", "queue stress did not pass")
     require(
@@ -1378,6 +1412,10 @@ def finalize(release_dir: Path) -> dict[str, Any]:
         "cuda_identity": object_artifact("cuda-oracle.json"),
         "candidate_host": object_artifact("candidate-host.json"),
         "image_receipt": object_artifact("image-receipt.json"),
+        "image_attestation": parse_json(
+            artifacts["image-attestation-verification.json"],
+            "image-attestation-verification.json",
+        ),
     }
 
     container_relatives = (
@@ -1419,6 +1457,9 @@ def finalize(release_dir: Path) -> dict[str, Any]:
         evidence["image_receipt"],
         container=containers[0],
         image_verification=cuda_verification,
+    )
+    attestation = validate_image_attestation(
+        evidence["image_attestation"], container=containers[0]
     )
     validate_b01_summary(recomputed_b01, containers[0])
     validate_prefill_interference(
@@ -1562,6 +1603,10 @@ def finalize(release_dir: Path) -> dict[str, Any]:
         },
         "source_commit": expected_commit,
         "image_receipt_sha256": hashes["image-receipt.json"],
+        "image_attestation": {
+            **attestation,
+            "verification_sha256": hashes["image-attestation-verification.json"],
+        },
         "model_revision": EXPECTED_PROFILE["VERSE_MODEL_REVISION"],
         "artifacts_sha256": hashes,
         "qualification_tools_sha256": qualification_tool_hashes,

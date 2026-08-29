@@ -28,7 +28,8 @@ CONTAINER_ID=$VERSE_VLLM_CONTAINER_ID
 GPU_DEVICE=${VERSE_VLLM_GPU_DEVICE:-0}
 GPU_UUID=$VERSE_VLLM_GPU_UUID
 READY_TIMEOUT=${VERSE_VLLM_READY_TIMEOUT_SECONDS:-900}
-EXPECTED_RESTART_POLICY=${VERSE_VLLM_EXPECTED_RESTART_POLICY:-unless-stopped}
+EXPECTED_RESTART_POLICY=${VERSE_VLLM_EXPECTED_RESTART_POLICY:-no}
+VALIDATION_OUTPUT=${VERSE_VLLM_VALIDATION_OUTPUT:-}
 
 [[ $READY_TIMEOUT =~ ^[0-9]+$ ]] && ((READY_TIMEOUT >= 30)) || {
   echo "VERSE_VLLM_READY_TIMEOUT_SECONDS must be at least 30" >&2
@@ -38,6 +39,12 @@ EXPECTED_RESTART_POLICY=${VERSE_VLLM_EXPECTED_RESTART_POLICY:-unless-stopped}
   echo "VERSE_VLLM_EXPECTED_RESTART_POLICY must be no or unless-stopped" >&2
   exit 1
 }
+if [[ -n $VALIDATION_OUTPUT ]]; then
+  [[ $VALIDATION_OUTPUT == /* && ! -e $VALIDATION_OUTPUT ]] || {
+    echo "VERSE_VLLM_VALIDATION_OUTPUT must be a new absolute path" >&2
+    exit 1
+  }
+fi
 [[ $GPU_DEVICE =~ ^[0-9]+$ ]] || {
   echo "VERSE_VLLM_GPU_DEVICE must be a non-negative integer" >&2
   exit 1
@@ -203,6 +210,9 @@ CURRENT_STARTED_AT=$(uv run --no-project python -c \
   echo "container restarted while readiness was being checked" >&2
   exit 1
 }
+if [[ -n $VALIDATION_OUTPUT ]]; then
+  install -m 0600 "$VALIDATED" "$VALIDATION_OUTPUT"
+fi
 
 printf 'status=healthy\ncontainer_id=%s\nendpoint=%s\ncommit=%s\nprofile=%s\ngpu_uuid=%s\nimage_receipt_sha256=%s\nmodel_manifest_sha256=%s\nmodel_config_sha256=%s\nmodel_ready_marker_sha256=%s\nmodel_file_count=%s\nmodel_bytes=%s\n' \
   "$CONTAINER_ID" "$ENDPOINT" "$VERSE_VLLM_EXPECTED_COMMIT" \

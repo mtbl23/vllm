@@ -18,6 +18,7 @@ require_env VERSE_VLLM_IMAGE
 require_env VERSE_VLLM_CONTAINER_ID
 require_env VERSE_VLLM_GPU_UUID
 require_env VERSE_VLLM_IMAGE_RECEIPT
+require_env VERSE_VLLM_GITHUB_TOKEN_FILE
 
 "$ROOT/tools/verse/verify_sm120_source.sh" "$VERSE_VLLM_EXPECTED_COMMIT" \
   >/dev/null
@@ -70,6 +71,8 @@ fi
 install -d -m 0750 "$VERSE_VLLM_RELEASE_DIR"
 install -m 0600 "$VERSE_VLLM_IMAGE_RECEIPT" \
   "$VERSE_VLLM_RELEASE_DIR/image-receipt.json"
+VERSE_VLLM_ATTESTATION_VERIFICATION_OUTPUT="$VERSE_VLLM_RELEASE_DIR/image-attestation-verification.json" \
+  "$ROOT/tools/verse/verify_sm120_attestation.sh" >/dev/null
 
 export VERSE_VLLM_RELEASE_NONCE
 VERSE_VLLM_RELEASE_NONCE=$(uv run --no-project python -c \

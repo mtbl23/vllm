@@ -51,6 +51,22 @@ def _secure_parent(path: Path) -> None:
         raise ValueError("deployment state parent must be owned by the caller")
     if stat.S_IMODE(metadata.st_mode) & (stat.S_IWGRP | stat.S_IWOTH):
         raise ValueError("deployment state parent must not be group/world writable")
+    for ancestor in (path, *path.parents):
+        if ancestor.is_symlink():
+            raise ValueError("deployment state ancestry must not contain symlinks")
+        ancestor_metadata = ancestor.stat()
+        if ancestor_metadata.st_uid not in (0, os.geteuid()):
+            raise ValueError("deployment state ancestry has an untrusted owner")
+        mode = stat.S_IMODE(ancestor_metadata.st_mode)
+        writable = mode & (stat.S_IWGRP | stat.S_IWOTH)
+        sticky_root = (
+            ancestor != path
+            and ancestor_metadata.st_uid == 0
+            and bool(mode & stat.S_ISVTX)
+            and bool(mode & stat.S_IWOTH)
+        )
+        if writable and not sticky_root:
+            raise ValueError("deployment state ancestry is group/world writable")
 
 
 def _load_public_proof(path: Path) -> tuple[dict[str, Any], str]:
@@ -77,6 +93,9 @@ def _validate_target_binding(
     manifest_path: Path | None,
     proof_path: Path,
     target_tunnel: str,
+    proof_zone_id: str,
+    proof_record_id: str,
+    proof_hostname: str,
 ) -> dict[str, Any]:
     proof, proof_sha256 = _load_public_proof(proof_path)
     if (
@@ -85,6 +104,22 @@ def _validate_target_binding(
         or proof.get("target_mode") != target_mode
     ):
         raise ValueError("public proof does not cover the exact target tunnel")
+    dns_binding = proof.get("dns_binding")
+    expected_dns_binding = {
+        "zone_id": proof_zone_id,
+        "record_id": proof_record_id,
+        "hostname": proof_hostname,
+        "record_type": "CNAME",
+        "proxied": True,
+        "content": _tunnel_cname(target_tunnel),
+    }
+    if not isinstance(dns_binding, dict) or any(
+        dns_binding.get(name) != expected
+        for name, expected in expected_dns_binding.items()
+    ):
+        raise ValueError(
+            "public proof does not bind the exact DNS record to the tunnel"
+        )
     identity: dict[str, str] = {}
     manifest_sha256: str | None = None
     if target_mode == "qualified-candidate":
@@ -140,6 +175,7 @@ def _validate_target_binding(
         "release_manifest_sha256": manifest_sha256,
         "public_proof_sha256": proof_sha256,
         "public_proof_verified_at": proof["verified_at"],
+        "proof_dns_binding": dns_binding,
     }
 
 
@@ -263,6 +299,9 @@ def main() -> int:
     parser.add_argument("--lock", type=Path)
     parser.add_argument("--target-release-manifest", type=Path)
     parser.add_argument("--target-public-proof", type=Path)
+    parser.add_argument("--target-proof-zone-id")
+    parser.add_argument("--target-proof-record-id")
+    parser.add_argument("--target-proof-hostname")
     parser.add_argument(
         "--target-mode",
         choices=("qualified-candidate", "recorded-rollback"),
@@ -313,10 +352,20 @@ def main() -> int:
         or args.lock is None
         or args.target_public_proof is None
         or args.target_mode is None
+        or args.target_proof_zone_id is None
+        or args.target_proof_record_id is None
+        or args.target_proof_hostname is None
     ):
         parser.error(
             "switch requires --apply, target tunnel/release/proof, receipt, and lock"
         )
+    if (
+        not HEX_ID.fullmatch(args.target_proof_zone_id)
+        or not HEX_ID.fullmatch(args.target_proof_record_id)
+        or not re.fullmatch(r"[a-z0-9.-]+", args.target_proof_hostname)
+        or "." not in args.target_proof_hostname
+    ):
+        parser.error("target proof DNS identity is invalid")
     target = _tunnel_cname(args.target_tunnel)
     if target == current:
         parser.error("current and target tunnels must differ")
@@ -325,6 +374,9 @@ def main() -> int:
         proof_path=args.target_public_proof,
         target_tunnel=args.target_tunnel,
         target_mode=args.target_mode,
+        proof_zone_id=args.target_proof_zone_id,
+        proof_record_id=args.target_proof_record_id,
+        proof_hostname=args.target_proof_hostname,
     )
 
     pending = {

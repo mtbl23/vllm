@@ -214,7 +214,7 @@ def base_container(tmp_path: Path) -> tuple[dict, list[str]]:
             "NetworkMode": "default",
             "ReadonlyRootfs": True,
             "SecurityOpt": ["no-new-privileges"],
-            "RestartPolicy": {"Name": "unless-stopped"},
+            "RestartPolicy": {"Name": "no"},
             "Tmpfs": {"/tmp": "rw,nosuid,size=4g"},
             "DeviceRequests": [
                 {
@@ -245,7 +245,10 @@ def base_container(tmp_path: Path) -> tuple[dict, list[str]]:
             },
         ],
         "NetworkSettings": {
-            "Ports": {"8000/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8001"}]}
+            "Ports": {
+                "8000/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8001"}],
+                "8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8080"}],
+            }
         },
     }
     args = [
@@ -349,7 +352,7 @@ def test_container_rejects_mismatched_expected_container_id(tmp_path: Path):
     assert "container ID does not match" in result.stderr
 
 
-def test_container_rejects_second_port_binding(tmp_path: Path):
+def test_container_rejects_second_vllm_port_binding(tmp_path: Path):
     container, args = base_container(tmp_path)
     container["NetworkSettings"]["Ports"]["8000/tcp"].append(
         {"HostIp": "0.0.0.0", "HostPort": "8002"}
@@ -358,7 +361,7 @@ def test_container_rejects_second_port_binding(tmp_path: Path):
     result = run_validator(container, args)
 
     assert result.returncode != 0
-    assert "exactly one port binding" in result.stderr
+    assert "one vLLM port binding" in result.stderr
 
 
 def test_container_rejects_api_key_in_config(tmp_path: Path):
@@ -763,8 +766,6 @@ def test_container_rejects_gpu_device_request_by_ordinal(tmp_path: Path):
 
 def test_container_accepts_initial_no_restart_policy(tmp_path: Path):
     container, args = base_container(tmp_path)
-    container["HostConfig"]["RestartPolicy"]["Name"] = "no"
-    args.extend(["--restart-policy", "no"])
 
     result = run_validator(container, args)
 
@@ -775,10 +776,7 @@ def test_launcher_binds_post_create_lifecycle_to_captured_container_id():
     source = RUNNER.read_text()
     lifecycle = source[source.index("CONTAINER_ID=$(docker create") :]
 
-    expected_commands = {
-        "start": 'docker start "$CONTAINER_ID"',
-        "update": 'docker update --restart unless-stopped "$CONTAINER_ID"',
-    }
+    expected_commands = {"start": 'docker start "$CONTAINER_ID"'}
     for command, invocation in expected_commands.items():
         assert invocation in lifecycle
         assert f'docker {command} "$CONTAINER"' not in lifecycle
@@ -794,6 +792,8 @@ def test_launcher_binds_post_create_lifecycle_to_captured_container_id():
     )
     assert lifecycle.count('VERSE_VLLM_CONTAINER_ID="$CONTAINER_ID"') == 2
     assert 'VERSE_VLLM_CONTAINER="$CONTAINER_ID"' not in lifecycle
+    assert "docker update --restart" not in lifecycle
+    assert '--publish "127.0.0.1:8080:8080"' in lifecycle
 
 
 def test_launcher_requires_exact_idle_gpu_identity_before_create():

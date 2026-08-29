@@ -25,6 +25,16 @@ API_KEY_FILE=${VERSE_VLLM_API_KEY_FILE:-}
   echo "VERSE_VLLM_API_KEY_FILE must be an absolute regular non-symlink file" >&2
   exit 1
 }
+uv run --no-project python -c '
+import os, pathlib, stat, sys
+path = pathlib.Path(sys.argv[1])
+metadata = path.stat()
+if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
+    raise SystemExit(1)
+' "$API_KEY_FILE" || {
+  echo "vLLM API key file must be caller-owned with exact mode 0600" >&2
+  exit 1
+}
 
 ACTUAL_VLLM_ID=$(docker inspect --format '{{.Id}}' "$VLLM_CONTAINER_ID")
 [[ $ACTUAL_VLLM_ID == "$VLLM_CONTAINER_ID" ]] || {
@@ -44,14 +54,17 @@ PORT_BINDINGS=$(docker inspect --format '{{json .NetworkSettings.Ports}}' \
 PORT_BINDING=$(uv run --no-project python -c '
 import json, sys
 ports = json.loads(sys.stdin.read())
-if set(ports) != {"8000/tcp"}:
+if set(ports) != {"8000/tcp", "8080/tcp"}:
     raise SystemExit("candidate has unexpected published ports")
 binding = ports["8000/tcp"]
 if binding != [{"HostIp": "127.0.0.1", "HostPort": "8000"}]:
     raise SystemExit("candidate must publish only 127.0.0.1:8000")
-print("127.0.0.1:8000")
+gateway = ports["8080/tcp"]
+if gateway != [{"HostIp": "127.0.0.1", "HostPort": "8080"}]:
+    raise SystemExit("candidate must publish only 127.0.0.1:8080 for its gateway")
+print("127.0.0.1:8000+127.0.0.1:8080")
 ' <<<"$PORT_BINDINGS")
-[[ $PORT_BINDING == 127.0.0.1:8000 ]] || {
+[[ $PORT_BINDING == 127.0.0.1:8000+127.0.0.1:8080 ]] || {
   echo "candidate port identity is invalid" >&2
   exit 1
 }
@@ -68,18 +81,20 @@ for name in (
     "release_manifest_sha256",
     "release_nonce",
     "model_revision",
+    "attestation_verification_sha256",
 ):
     print(payload[name])
 ' <<<"$RELEASE_IDENTITY")
-[[ ${#RELEASE_FIELDS[@]} -eq 3 ]] || {
+[[ ${#RELEASE_FIELDS[@]} -eq 4 ]] || {
   echo "release identity is incomplete" >&2
   exit 1
 }
 RELEASE_MANIFEST_SHA256=${RELEASE_FIELDS[0]}
 RELEASE_NONCE=${RELEASE_FIELDS[1]}
 MODEL_REVISION=${RELEASE_FIELDS[2]}
+ATTESTATION_VERIFICATION_SHA256=${RELEASE_FIELDS[3]}
 API_KEY=$(cat "$API_KEY_FILE")
-[[ -n $API_KEY && $API_KEY != *$'\n'* ]] || {
+[[ -n $API_KEY && $API_KEY != *$'\n'* && ${#API_KEY} -le 4096 ]] || {
   echo "vLLM API key must contain one non-empty line" >&2
   exit 1
 }
@@ -118,7 +133,7 @@ trap cleanup_failed_gateway EXIT
 GATEWAY_ID=$(docker create \
   --name "$GATEWAY_NAME" \
   --restart no \
-  --network host \
+  --network "container:$VLLM_CONTAINER_ID" \
   --user 65534:65534 \
   --cap-drop ALL \
   --security-opt no-new-privileges \
@@ -134,6 +149,7 @@ GATEWAY_ID=$(docker create \
   --env "VERSE_MODEL_REVISION=$MODEL_REVISION" \
   --env "VERSE_RELEASE_NONCE=$RELEASE_NONCE" \
   --env "VERSE_RELEASE_MANIFEST_SHA256=$RELEASE_MANIFEST_SHA256" \
+  --env "VERSE_ATTESTATION_VERIFICATION_SHA256=$ATTESTATION_VERIFICATION_SHA256" \
   --mount "type=bind,src=$CADDY_CONFIG,dst=/etc/caddy/Caddyfile,readonly" \
   "$CADDY_IMAGE" caddy run --config /etc/caddy/Caddyfile --adapter caddyfile)
 
@@ -187,7 +203,6 @@ for forbidden_path in /pause /abort_requests /invocations /metrics /docs /openap
   }
 done
 
-docker update --restart unless-stopped "$GATEWAY_ID" >/dev/null
 trap - EXIT
 rm -f "$MODEL_RESPONSE" "$AUTH_HEADER"
 printf 'status=ready\ngateway_container_id=%s\nupstream_container_id=%s\nrelease_manifest_sha256=%s\nendpoint=http://127.0.0.1:8080\n' \

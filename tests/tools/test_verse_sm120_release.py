@@ -607,6 +607,31 @@ def candidate_host() -> dict:
     }
 
 
+def image_attestation() -> list[dict]:
+    return [
+        {
+            "verificationResult": {
+                "statement": {
+                    "subject": [
+                        {
+                            "name": "registry/runtime",
+                            "digest": {"sha256": "a" * 64},
+                        }
+                    ],
+                    "predicate": {
+                        "source_commit": FORK_COMMIT,
+                        "signer_workflow": (
+                            "https://github.com/mtbl23/vllm/"
+                            ".github/workflows/verse-sm120-image.yml"
+                        ),
+                        "source_ref": "refs/heads/verse/v0.28-sm120-nvfp4-fa2",
+                    },
+                }
+            }
+        }
+    ]
+
+
 def release_tree(tmp_path: Path) -> Path:
     release = tmp_path / "release"
     reports = b01_reports()
@@ -640,6 +665,7 @@ def release_tree(tmp_path: Path) -> Path:
     write_json(release / "cuda-oracle.json", cuda_identity(log))
     write_json(release / "candidate-host.json", candidate_host())
     write_json(release / "image-receipt.json", image_receipt())
+    write_json(release / "image-attestation-verification.json", image_attestation())
     return release
 
 
@@ -657,9 +683,23 @@ def test_release_finalizer_accepts_one_unchanged_container(tmp_path: Path):
         MODULE.EXPECTED_CUDA_TEST_COUNTS.values()
     )
     assert result["disposable_host"]["identity_sha256"] == HOST_IDENTITY_SHA256
+    assert result["image_attestation"]["source_commit"] == FORK_COMMIT
     assert set(result["artifacts_sha256"]) == set(
         MODULE.EXPECTED_ARTIFACT_RELATIVE_PATHS
     )
+
+
+def test_release_finalizer_rejects_attestation_for_another_commit(tmp_path: Path):
+    release = release_tree(tmp_path)
+    path = release / "image-attestation-verification.json"
+    payload = json.loads(path.read_text())
+    payload[0]["verificationResult"]["statement"]["predicate"]["source_commit"] = (
+        "0" * 40
+    )
+    write_json(path, payload)
+
+    with pytest.raises(ValueError, match="wrong source commit"):
+        MODULE.finalize(release)
 
 
 def test_release_finalizer_rejects_receipt_binary_identity_drift(tmp_path: Path):

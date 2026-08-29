@@ -22,6 +22,8 @@ from typing import Any
 from validate_sm120_gateway_release import load_owned_file, validate
 
 MAX_RESPONSE_BYTES = 1_000_000
+CF_API_ROOT = "https://api.cloudflare.com/client/v4"
+HEX_ID = re.compile(r"[0-9a-f]{32}")
 FORBIDDEN = (
     "/pause",
     "/abort_requests",
@@ -80,6 +82,54 @@ def _request(
     return status, raw, content_type, response_headers
 
 
+def _cloudflare_dns_binding(
+    *,
+    zone_id: str,
+    record_id: str,
+    hostname: str,
+    target_tunnel: str,
+    token: str,
+) -> dict[str, Any]:
+    path = f"/zones/{zone_id}/dns_records/{record_id}"
+    request = urllib.request.Request(
+        CF_API_ROOT + path,
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        method="GET",
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=20) as response:
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f"Cloudflare API returned HTTP {error.code}") from error
+    if len(raw) > MAX_RESPONSE_BYTES:
+        raise RuntimeError("Cloudflare API response exceeded the safety limit")
+    payload = json.loads(raw)
+    if not isinstance(payload, dict) or payload.get("success") is not True:
+        raise RuntimeError("Cloudflare API returned an unsuccessful response")
+    record = payload.get("result")
+    if not isinstance(record, dict):
+        raise RuntimeError("Cloudflare API response lacks a DNS record")
+    expected_content = f"{target_tunnel}.cfargotunnel.com"
+    if record.get("id") != record_id:
+        raise RuntimeError("Cloudflare readback returned a different DNS record ID")
+    if record.get("type") != "CNAME" or record.get("name") != hostname:
+        raise RuntimeError("public endpoint is not the exact verified CNAME")
+    if record.get("proxied") is not True:
+        raise RuntimeError("public endpoint CNAME is not proxied")
+    if str(record.get("content", "")).rstrip(".").lower() != expected_content:
+        raise RuntimeError("public endpoint CNAME does not target the requested tunnel")
+    return {
+        "zone_id": zone_id,
+        "record_id": record_id,
+        "hostname": hostname,
+        "record_type": "CNAME",
+        "proxied": True,
+        "content": expected_content,
+        "modified_on": record.get("modified_on"),
+    }
+
+
 def _manifest_identity(path: Path) -> tuple[dict[str, str], str]:
     payload, manifest_sha256 = load_owned_file(path)
     container = payload.get("container")
@@ -108,6 +158,10 @@ def main() -> int:
     )
     parser.add_argument("--release-manifest", type=Path)
     parser.add_argument("--target-tunnel", required=True)
+    parser.add_argument("--zone-id", required=True)
+    parser.add_argument("--record-id", required=True)
+    parser.add_argument("--hostname", required=True)
+    parser.add_argument("--cloudflare-api-token-file", type=Path, required=True)
     args = parser.parse_args()
 
     endpoint = args.endpoint.rstrip("/")
@@ -119,6 +173,17 @@ def main() -> int:
     )
     if tunnel_pattern.fullmatch(args.target_tunnel) is None:
         parser.error("target tunnel must be an exact lowercase UUID")
+    if (
+        HEX_ID.fullmatch(args.zone_id) is None
+        or HEX_ID.fullmatch(args.record_id) is None
+    ):
+        parser.error("zone ID and record ID must be exact lowercase 32-character IDs")
+    if not re.fullmatch(r"[a-z0-9.-]+", args.hostname) or "." not in args.hostname:
+        parser.error("hostname must be an exact lowercase DNS name")
+    if parsed.hostname != args.hostname or parsed.port is not None:
+        parser.error(
+            "endpoint must use the exact verified hostname and default HTTPS port"
+        )
     proxy_variables = (
         "ALL_PROXY",
         "HTTPS_PROXY",
@@ -135,6 +200,13 @@ def main() -> int:
         "CF-Access-Client-Secret": _secret(args.access_client_secret_file),
     }
     authorized = {**access, "Authorization": f"Bearer {_secret(args.api_key_file)}"}
+    dns_binding = _cloudflare_dns_binding(
+        zone_id=args.zone_id,
+        record_id=args.record_id,
+        hostname=args.hostname,
+        target_tunnel=args.target_tunnel,
+        token=_secret(args.cloudflare_api_token_file),
+    )
     if args.target_mode == "qualified-candidate":
         if args.release_manifest is None:
             parser.error("qualified-candidate proof requires --release-manifest")
@@ -162,6 +234,9 @@ def main() -> int:
             "x-verse-model-revision": identity["model_revision"],
             "x-verse-release-nonce": identity["release_nonce"],
             "x-verse-release-manifest-sha256": manifest_sha256,
+            "x-verse-attestation-verification-sha256": identity[
+                "attestation_verification_sha256"
+            ],
         }
         for name, expected in expected_headers.items():
             if normalized_headers.get(name) != expected:
@@ -221,6 +296,7 @@ def main() -> int:
                 "model": args.model,
                 "target_mode": args.target_mode,
                 "target_tunnel": args.target_tunnel,
+                "dns_binding": dns_binding,
                 "release_manifest_sha256": manifest_sha256,
                 **identity,
                 "allowed_paths": 4,

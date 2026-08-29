@@ -407,6 +407,7 @@ CONTAINER_ID=$(docker create \
   --read-only \
   --tmpfs /tmp:rw,nosuid,size=4g \
   --publish "127.0.0.1:${HOST_PORT}:8000" \
+  --publish "127.0.0.1:8080:8080" \
   "${MOUNT_ARGS[@]}" \
   "${ENV_ARGS[@]}" \
   "$VERSE_VLLM_IMAGE" \
@@ -454,9 +455,8 @@ uv run --script "$ROOT/tools/verse/check_sm120_chat_contract.py" \
   --api-key-file "$VERSE_VLLM_API_KEY_FILE" \
   --startup-only
 
-docker update --restart unless-stopped "$CONTAINER_ID" >/dev/null
 VERSE_VLLM_CONTAINER_ID="$CONTAINER_ID" \
-  VERSE_VLLM_EXPECTED_RESTART_POLICY=unless-stopped \
+  VERSE_VLLM_EXPECTED_RESTART_POLICY=no \
   "$ROOT/tools/verse/check_sm120_server.sh"
 
 trap - EXIT
