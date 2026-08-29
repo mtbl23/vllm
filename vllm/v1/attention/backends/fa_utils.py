@@ -28,6 +28,8 @@ if current_platform.is_cuda():
 
         _CUDA_FLASH_ATTN_AVAILABLE = True
     except ImportError:
+        if not envs.VLLM_VERSE_RUNTIME_STRICT:
+            raise
         # The fixed Verse SM120 appliance deliberately omits the bundled
         # FlashAttention extension matrix and routes its text-only Gemma 4
         # workload through pinned FlashInfer. Keep multimodal model imports

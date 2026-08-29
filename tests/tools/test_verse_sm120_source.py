@@ -375,5 +375,6 @@ def test_verse_wheel_omits_the_unused_bundled_flash_attention_matrix():
     assert 'if (NOT "$ENV{VLLM_VERSE_SM120_WHEEL}" STREQUAL "1")' in cmake
     assert "include(cmake/external_projects/vllm_flash_attn.cmake)" in cmake
     assert "_CUDA_FLASH_ATTN_AVAILABLE = False" in fa_utils
+    assert "if not envs.VLLM_VERSE_RUNTIME_STRICT:" in fa_utils
     assert "CUDA FlashAttention is unavailable in this vLLM build" in fa_utils
     assert "return _CUDA_FLASH_ATTN_AVAILABLE" in fa_utils

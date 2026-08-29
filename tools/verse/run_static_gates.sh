@@ -120,6 +120,8 @@ grep -Fq \
 grep -Fq 'if (NOT "$ENV{VLLM_VERSE_SM120_WHEEL}" STREQUAL "1")' CMakeLists.txt
 grep -Fq '_CUDA_FLASH_ATTN_AVAILABLE = False' \
   vllm/v1/attention/backends/fa_utils.py
+grep -Fq 'if not envs.VLLM_VERSE_RUNTIME_STRICT:' \
+  vllm/v1/attention/backends/fa_utils.py
 grep -Fq 'Use the configured FlashInfer attention backend.' \
   vllm/v1/attention/backends/fa_utils.py
 grep -Fq 'must not ship bundled vllm-flash-attn extensions' \
