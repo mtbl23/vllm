@@ -1,0 +1,70 @@
+name: Verse SM120 immutable image
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - verse/v0.28-sm120-nvfp4-fa2
+    paths:
+      - .github/workflows/verse-sm120-image.yml
+      - cmake/**
+      - csrc/**
+      - docker/**
+      - requirements/verse-sm120-flashinfer.lock
+      - tests/kernels/attention/test_cache.py
+      - tests/kernels/attention/test_flashinfer.py
+      - tests/kernels/quantization/nvfp4_utils.py
+      - tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py
+      - tests/v1/attention/test_gemma4_nvfp4_flashinfer_routing.py
+      - tests/v1/attention/test_nvfp4_flashinfer_vosplit.py
+      - tools/verse/**
+      - vllm/**
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: verse-sm120-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Reclaim runner disk
+        run: |
+          sudo rm -rf \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/lib/android \
+            /usr/share/dotnet
+          df -h /
+
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push exact SM120 image
+        env:
+          VERSE_VLLM_BUILD_OUTPUT: push
+          VERSE_VLLM_IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/verse-vllm
+        run: tools/verse/build_sm120_image.sh | tee verse-sm120-image.txt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: verse-sm120-image-${{ github.sha }}
+          path: verse-sm120-image.txt
+          if-no-files-found: error
+          retention-days: 30
