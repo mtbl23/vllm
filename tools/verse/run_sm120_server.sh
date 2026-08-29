@@ -18,6 +18,7 @@ require_env VERSE_VLLM_CACHE_DIR
 require_env VERSE_MODEL_CACHE_DIR
 require_env VERSE_VLLM_API_KEY_FILE
 require_env VERSE_VLLM_GPU_UUID
+require_env VERSE_VLLM_IMAGE_RECEIPT
 
 "$ROOT/tools/verse/verify_sm120_source.sh" "$VERSE_VLLM_EXPECTED_COMMIT" \
   >/dev/null
@@ -43,6 +44,10 @@ if [[ $VERSE_MODEL_CACHE_DIR != /* ]]; then
   echo "VERSE_MODEL_CACHE_DIR must be absolute" >&2
   exit 1
 fi
+[[ $VERSE_VLLM_IMAGE_RECEIPT == /* ]] || {
+  echo "VERSE_VLLM_IMAGE_RECEIPT must be absolute" >&2
+  exit 1
+}
 
 PROFILE_SHELL=$(uv run --script "$ROOT/tools/verse/validate_sm120_profile.py" \
   --profile "$ROOT/tools/verse/sm120_profile.env" \
@@ -238,6 +243,15 @@ IMAGE_WHEEL_VERSION=$(docker image inspect \
 EXPECTED_SOURCE_ARCHIVE=$(git -C "$ROOT" -c tar.umask=0000 archive --format=tar \
   "$VERSE_VLLM_EXPECTED_COMMIT" | verse_sha256 | awk '{print $1}')
 EXPECTED_WHEEL_VERSION="0.28.0+verse.${VERSE_VLLM_EXPECTED_COMMIT:0:12}"
+RECEIPT_ARGS=(
+  --image "$VERSE_VLLM_IMAGE"
+  --fork-commit "$VERSE_VLLM_EXPECTED_COMMIT"
+  --runtime-profile "$VERSE_RUNTIME_PROFILE"
+  --source-archive-sha256 "$EXPECTED_SOURCE_ARCHIVE"
+  --vllm-wheel-version "$EXPECTED_WHEEL_VERSION"
+)
+uv run --script "$ROOT/tools/verse/sm120_image_receipt.py" verify \
+  "${RECEIPT_ARGS[@]}" --receipt "$VERSE_VLLM_IMAGE_RECEIPT" >/dev/null
 [[ $IMAGE_COMMIT == "$VERSE_VLLM_EXPECTED_COMMIT" ]] || {
   echo "image commit $IMAGE_COMMIT does not match expected commit" >&2
   exit 1
@@ -260,6 +274,19 @@ EXPECTED_WHEEL_VERSION="0.28.0+verse.${VERSE_VLLM_EXPECTED_COMMIT:0:12}"
   exit 1
 }
 
+IMAGE_VERIFICATION=$(mktemp)
+trap 'rm -f "$IMAGE_VERIFICATION"' EXIT
+docker run --rm --network none --read-only --cap-drop ALL \
+  --security-opt no-new-privileges \
+  --entrypoint /usr/local/bin/verify-verse-sm120-image \
+  "$VERSE_VLLM_IMAGE" >"$IMAGE_VERIFICATION"
+uv run --script "$ROOT/tools/verse/sm120_image_receipt.py" verify \
+  "${RECEIPT_ARGS[@]}" --receipt "$VERSE_VLLM_IMAGE_RECEIPT" \
+  --verification "$IMAGE_VERIFICATION" >/dev/null
+IMAGE_RECEIPT_SHA256=$(verse_sha256 "$VERSE_VLLM_IMAGE_RECEIPT" | awk '{print $1}')
+rm -f "$IMAGE_VERIFICATION"
+trap - EXIT
+
 verify_gpu_identity
 
 install -d -o 0 -g 0 -m 0750 "$VERSE_VLLM_CACHE_DIR"
@@ -278,7 +305,8 @@ install -d -o 2000 -g 0 -m 0750 \
 
 uv run --no-project python - \
   "$RUNTIME_CACHE" "$VERSE_VLLM_IMAGE" "$VERSE_VLLM_EXPECTED_COMMIT" \
-  "$GPU_DEVICE" "$GPU_UUID" "$VERSE_RUNTIME_PROFILE" <<'PY'
+  "$GPU_DEVICE" "$GPU_UUID" "$VERSE_RUNTIME_PROFILE" \
+  "$IMAGE_RECEIPT_SHA256" <<'PY'
 import json
 import os
 import sys
@@ -294,6 +322,7 @@ payload = {
     "profile": sys.argv[6],
     "gpu_device": sys.argv[4],
     "gpu_uuid": sys.argv[5],
+    "image_receipt_sha256": sys.argv[7],
 }
 temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 temporary.chmod(0o640)

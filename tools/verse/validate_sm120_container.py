@@ -39,6 +39,7 @@ FORBIDDEN_RUNTIME_ENVIRONMENT_NAMES = frozenset(
         "FLASHINFER_DISABLE_VERSION_CHECK",
         "VLLM_BATCH_INVARIANT",
         "VLLM_DISABLED_KERNELS",
+        "VLLM_SERVER_DEV_MODE",
         "VLLM_TEST_FORCE_FP8_MARLIN",
     }
 )
@@ -58,6 +59,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-cache", type=Path, required=True)
     parser.add_argument("--model-directory", type=Path, required=True)
     parser.add_argument("--api-key-file", type=Path, required=True)
+    parser.add_argument("--image-receipt-sha256", required=True)
     parser.add_argument(
         "--restart-policy",
         choices=("no", "unless-stopped"),
@@ -230,6 +232,7 @@ def validate_runtime_identity(args: argparse.Namespace) -> None:
             "profile": EXPECTED_PROFILE["VERSE_RUNTIME_PROFILE"],
             "gpu_device": args.gpu_device,
             "gpu_uuid": args.gpu_uuid,
+            "image_receipt_sha256": args.image_receipt_sha256,
         },
         "runtime cache identity does not match the candidate",
     )
@@ -244,6 +247,10 @@ def validate_container(container: dict[str, Any], args: argparse.Namespace) -> d
     require(container.get("Id") == args.container_id, "container ID does not match")
     require(args.gpu_device.isdigit(), "GPU ordinal is invalid")
     require(GPU_UUID_RE.fullmatch(args.gpu_uuid) is not None, "GPU UUID is invalid")
+    require(
+        re.fullmatch(r"[0-9a-f]{64}", args.image_receipt_sha256) is not None,
+        "image receipt hash is invalid",
+    )
     require(
         args.served_model == EXPECTED_PROFILE["VERSE_SERVED_MODEL_NAME"],
         "served model name does not match the fixed Verse profile",

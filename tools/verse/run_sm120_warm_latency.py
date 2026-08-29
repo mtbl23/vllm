@@ -26,7 +26,7 @@ from check_sm120_chat_contract import (
     validate_endpoint,
 )
 from run_sm120_churn import fetch_metrics, require
-
+from sm120_evidence_identity import add_identity_arguments, validated_identity
 
 OPENER = urllib.request.build_opener(
     urllib.request.ProxyHandler({}), NoRedirectHandler()
@@ -112,7 +112,10 @@ def completion(
         else:
             raise ValueError("stream ended without [DONE]")
     require(first_content_at is not None, "completion emitted no content")
-    require(completion_tokens is not None and completion_tokens > 0, "usage missing")
+    require(
+        completion_tokens == max_tokens,
+        "completion did not return the requested exact token count",
+    )
     content = "".join(fragments)
     require(bool(content), "completion content was empty")
     decode_seconds = max(0.000001, ended - first_content_at)
@@ -127,7 +130,9 @@ def completion(
     )
 
 
-def pressure_sampler(endpoint: str, stop: threading.Event, samples: list[dict[str, float]]) -> None:
+def pressure_sampler(
+    endpoint: str, stop: threading.Event, samples: list[dict[str, float]]
+) -> None:
     while not stop.wait(0.1):
         samples.append(fetch_metrics(endpoint))
 
@@ -208,7 +213,9 @@ def main() -> int:
     parser.add_argument("--api-key-file", type=Path, required=True)
     parser.add_argument("--clients", type=int, default=38)
     parser.add_argument("--max-tokens", type=int, default=100)
+    add_identity_arguments(parser)
     args = parser.parse_args()
+    identity = validated_identity(args)
     require(args.clients >= 6, "at least six loaded clients are required")
     require(args.max_tokens > 0, "max tokens must be positive")
 
@@ -217,7 +224,9 @@ def main() -> int:
     before = fetch_metrics(endpoint)
     require(before["running"] == 0 and before["waiting"] == 0, "runtime must be idle")
 
-    assignments = [PROMPT_TARGETS[index % len(PROMPT_TARGETS)] for index in range(args.clients)]
+    assignments = [
+        PROMPT_TARGETS[index % len(PROMPT_TARGETS)] for index in range(args.clients)
+    ]
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
         prompts = list(
             pool.map(
@@ -234,14 +243,18 @@ def main() -> int:
 
     cold_work = [
         (target, messages, 22000000 + index)
-        for index, (target, messages) in enumerate(zip(assignments, prompts, strict=True))
+        for index, (target, messages) in enumerate(
+            zip(assignments, prompts, strict=True)
+        )
     ]
     cold, cold_pressure = run_phase(
         endpoint, key, args.model, cold_work, max_tokens=args.max_tokens
     )
 
     warm_work: list[tuple[int, list[dict[str, str]], int]] = []
-    for index, ((target, _, content), original) in enumerate(zip(cold, prompts, strict=True)):
+    for index, ((target, _, content), original) in enumerate(
+        zip(cold, prompts, strict=True)
+    ):
         warm_work.append(
             (
                 target,
@@ -250,7 +263,10 @@ def main() -> int:
                     {"role": "assistant", "content": content},
                     {
                         "role": "user",
-                        "content": "I hold the thread of the scene and continue with one short new beat.",
+                        "content": (
+                            "I hold the thread of the scene and continue with one "
+                            "short new beat."
+                        ),
                     },
                 ],
                 23000000 + index,
@@ -272,11 +288,15 @@ def main() -> int:
         json.dumps(
             {
                 "status": "pass",
+                **identity,
                 "clients": args.clients,
                 "completion_tokens_requested": args.max_tokens,
                 "seed_prompt_tokens_below_warm_target": 200,
                 "cold": {"pressure": cold_pressure, "by_prompt_tokens": grouped(cold)},
-                "warm_delta": {"pressure": warm_pressure, "by_prompt_tokens": grouped(warm)},
+                "warm_delta": {
+                    "pressure": warm_pressure,
+                    "by_prompt_tokens": grouped(warm),
+                },
                 "preemptions_delta": after["preemptions"] - before["preemptions"],
             },
             indent=2,

@@ -72,7 +72,7 @@ CUDA_TEST_ARTIFACT_RELATIVE_PATHS = (
     "tests/v1/attention/test_gemma4_nvfp4_flashinfer_routing.py",
     "tests/v1/attention/test_nvfp4_flashinfer_vosplit.py",
     "tests/kernels/attention/test_flashinfer.py",
-    "tests/kernels/attention/test_cache.py",
+    "tests/kernels/attention/test_verse_sm120_nvfp4_kv_cache.py",
     "tests/kernels/quantization/nvfp4_utils.py",
     "tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py",
 )
@@ -81,10 +81,14 @@ CUDA_ROUTING_TEST_PREFIXES = (
     "tests/v1/attention/test_nvfp4_flashinfer_vosplit.py::",
 )
 CUDA_GPU_TEST_PREFIXES = (
-    "tests/kernels/attention/test_flashinfer.py::"
-    "test_flashinfer_fa2_nvfp4_gemma4_vo_split_hnd_matches_reference",
-    "tests/kernels/attention/test_flashinfer.py::"
-    "test_flashinfer_fa2_nvfp4_gemma4_sliding_hnd_matches_reference",
+    (
+        "tests/kernels/attention/test_flashinfer.py::"
+        "test_flashinfer_fa2_nvfp4_gemma4_vo_split_hnd_matches_reference"
+    ),
+    (
+        "tests/kernels/attention/test_flashinfer.py::"
+        "test_flashinfer_fa2_nvfp4_gemma4_sliding_hnd_matches_reference"
+    ),
 )
 CUDA_B12X_TEST_PREFIX = (
     "tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py::"
@@ -106,8 +110,8 @@ CUDA_B12X_TEST_NODE_IDS = (
     CUDA_B12X_PROFILE_TEST_NODE_IDS + CUDA_B12X_GEMMA_TEST_NODE_IDS
 )
 CUDA_KV_STORE_TEST_PREFIX = (
-    "tests/kernels/attention/test_cache.py::"
-    "test_reshape_and_cache_nvfp4_physical_hnd_shape"
+    "tests/kernels/attention/test_verse_sm120_nvfp4_kv_cache.py::"
+    "test_verse_sm120_nvfp4_physical_hnd_roundtrip"
 )
 CUDA_KV_STORE_TEST_NODE_IDS = tuple(
     f"{CUDA_KV_STORE_TEST_PREFIX}[{case}-cuda:0]"
@@ -124,6 +128,11 @@ QUALIFICATION_TOOL_RELATIVE_PATHS = (
     "tools/verse/run_sm120_cuda_gates.sh",
     "tools/verse/run_sm120_acceptance.sh",
     "tools/verse/run_sm120_churn.py",
+    "tools/verse/run_sm120_queue_stress.py",
+    "tools/verse/run_sm120_user_latency.py",
+    "tools/verse/run_sm120_warm_latency.py",
+    "tools/verse/sm120_evidence_identity.py",
+    "tools/verse/sm120_image_receipt.py",
     "tools/verse/check_sm120_chat_contract.py",
     "benchmarks/verse/sm120_prefill_interference.py",
     "benchmarks/verse/SM120_PREFILL_SCHEDULER_RESULTS.md",
@@ -147,11 +156,15 @@ EXPECTED_ARTIFACT_RELATIVE_PATHS = (
     "short/prefill-30x8.json",
     "short/container-before.json",
     "short/container-after.json",
+    "queue-stress.json",
+    "user-latency.json",
+    "warm-latency.json",
     "churn.json",
     "post-churn-chat-contract.json",
     "post-churn-server.txt",
     "container-after-churn.json",
     "candidate-host.json",
+    "image-receipt.json",
 )
 ALLOWED_MANIFEST_OUTPUTS = {
     ".release-manifest.tmp",
@@ -529,6 +542,13 @@ def validate_chat_contract(payload: dict[str, Any]) -> None:
         capacity.get("concurrent_6144_completion_proven") is True,
         "capacity evidence did not prove 38 concurrent exact-6144 completions",
     )
+    require(
+        capacity.get("concurrent_6143_residency_proven") is True
+        and int(capacity.get("simultaneous_resident_context_tokens_per_request", -1))
+        == 6143
+        and float(capacity.get("kv_cache_usage_at_simultaneous_6143", 0)) > 0,
+        "capacity evidence did not prove 38 simultaneous near-full 6K residents",
+    )
     configured_blocks = EXPECTED_TOTAL_KV_BYTES // EXPECTED_BLOCK_KV_BYTES
     usable_blocks = configured_blocks - EXPECTED_RESERVED_KV_BLOCKS
     require(
@@ -868,9 +888,12 @@ def validate_cuda_identity(
     wheel_artifact = binary_identity.get("wheel_artifact")
     require(
         isinstance(native_extension, dict)
-        and set(native_extension) == {"path", "bytes", "sha256"}
+        and set(native_extension) == {"path", "wheel_member", "bytes", "sha256"}
         and str(native_extension.get("path", "")).endswith(
             "/vllm/_C_stable_libtorch.abi3.so"
+        )
+        and str(native_extension.get("wheel_member", "")).endswith(
+            "/_C_stable_libtorch.abi3.so"
         )
         and int(native_extension.get("bytes", 0)) > 0
         and SHA256_RE.fullmatch(str(native_extension.get("sha256", ""))) is not None,
@@ -1009,6 +1032,224 @@ def validate_cuda_identity(
     return verification, cuda_gpu, cuda_host
 
 
+def validate_bound_identity(
+    payload: dict[str, Any],
+    *,
+    container: dict[str, Any],
+    release_nonce: str,
+    expected_gpu: dict[str, Any],
+    label: str,
+) -> None:
+    config = container.get("Config") or {}
+    labels = config.get("Labels") or {}
+    require(
+        payload.get("image_digest") == config.get("Image")
+        and payload.get("fork_commit") == labels.get("ai.vllm.build.commit")
+        and payload.get("model_revision") == EXPECTED_PROFILE["VERSE_MODEL_REVISION"]
+        and payload.get("release_nonce") == release_nonce
+        and payload.get("container_id") == container.get("Id"),
+        f"{label} belongs to another candidate or release run",
+    )
+    require(
+        parse_gpu_csv(str(payload.get("gpu_name", "")), label) == expected_gpu,
+        f"{label} has the wrong GPU identity",
+    )
+
+
+def validate_image_receipt(
+    receipt: dict[str, Any],
+    *,
+    container: dict[str, Any],
+    image_verification: dict[str, Any],
+) -> None:
+    expected_keys = {
+        "schema_version",
+        "status",
+        "approved_at",
+        "image_digest",
+        "fork_commit",
+        "runtime_profile",
+        "source_archive_sha256",
+        "vllm_wheel_version",
+        "binary_identity",
+    }
+    require(
+        set(receipt) == expected_keys
+        and receipt.get("schema_version") == 1
+        and receipt.get("status") == "approved",
+        "image receipt schema is invalid",
+    )
+    config = container.get("Config") or {}
+    labels = config.get("Labels") or {}
+    require(
+        receipt.get("image_digest") == config.get("Image")
+        and receipt.get("fork_commit") == labels.get("ai.vllm.build.commit")
+        and receipt.get("runtime_profile") == EXPECTED_PROFILE_IDENTITY
+        and receipt.get("source_archive_sha256")
+        == labels.get("ai.verse.source.archive.sha256")
+        and receipt.get("vllm_wheel_version")
+        == labels.get("ai.verse.vllm.wheel.version"),
+        "image receipt does not match the immutable container",
+    )
+    try:
+        approved_at = datetime.fromisoformat(str(receipt.get("approved_at", "")))
+    except ValueError as error:
+        raise ValueError("image receipt approval time is invalid") from error
+    require(
+        approved_at.tzinfo is not None,
+        "image receipt approval time must be timezone-aware",
+    )
+    binary = image_verification.get("vllm_binary_identity") or {}
+    native = binary.get("native_extension") or {}
+    wheel = binary.get("wheel_artifact") or {}
+    expected_binary = {
+        "wheel_filename": wheel.get("filename"),
+        "wheel_sha256": wheel.get("sha256"),
+        "wheel_manifest_sha256": wheel.get("manifest_sha256"),
+        "native_extension_member": native.get("wheel_member"),
+        "native_extension_sha256": native.get("sha256"),
+    }
+    require(
+        receipt.get("binary_identity") == expected_binary,
+        "runtime binary identity differs from the approved image receipt",
+    )
+
+
+def validate_queue_stress(payload: dict[str, Any]) -> None:
+    require(payload.get("status") == "pass", "queue stress did not pass")
+    require(
+        int(payload.get("stress_seconds", 0)) >= 120,
+        "queue stress was too short",
+    )
+    require(
+        payload.get("prompt_token_targets") == [5500, 5750, 6000]
+        and int(payload.get("max_completion_tokens", -1)) == 128,
+        "queue stress used the wrong request shape",
+    )
+    phases = payload.get("phases")
+    require(
+        isinstance(phases, list)
+        and len(phases) == 2
+        and [phase.get("name") for phase in phases] == ["max-active", "overflow-queue"],
+        "queue stress has the wrong phase inventory",
+    )
+    expected = ((38, False), (76, True))
+    for phase, (clients, require_waiting) in zip(phases, expected, strict=True):
+        require(isinstance(phase, dict), "queue stress phase is not an object")
+        metrics = phase.get("metrics_evidence")
+        before = phase.get("metrics_before")
+        after = phase.get("metrics_after")
+        require(
+            isinstance(metrics, dict)
+            and isinstance(before, dict)
+            and isinstance(after, dict),
+            "queue stress phase lacks metrics evidence",
+        )
+        require(
+            int(phase.get("clients", -1)) == clients
+            and int(phase.get("active_capacity", -1)) == EXPECTED_CONCURRENCY
+            and int(phase.get("request_errors", -1)) == 0
+            and int(metrics.get("observed_max_running", -1)) == EXPECTED_CONCURRENCY
+            and float(metrics.get("observed_generation_tokens_delta", 0)) > 0,
+            "queue stress phase did not prove full healthy decode capacity",
+        )
+        require(
+            float(before.get("running", -1)) == 0
+            and float(before.get("waiting", -1)) == 0
+            and float(after.get("running", -1)) == 0
+            and float(after.get("waiting", -1)) == 0
+            and float(after.get("preemptions", -1))
+            == float(before.get("preemptions", -2)),
+            "queue stress phase did not own, drain, or preserve the scheduler",
+        )
+        observed_waiting = int(phase.get("observed_max_waiting", -1))
+        require(
+            observed_waiting > 0 if require_waiting else observed_waiting == 0,
+            "queue stress did not prove the expected waiting-queue behavior",
+        )
+
+
+def validate_user_latency(payload: dict[str, Any]) -> None:
+    require(payload.get("status") == "pass", "user latency did not pass")
+    require(
+        int(payload.get("completion_tokens_requested", -1)) == 128,
+        "user latency used the wrong completion length",
+    )
+    modes = payload.get("modes")
+    require(
+        isinstance(modes, list)
+        and len(modes) == 2
+        and [mode.get("mode") for mode in modes] == ["saturated", "overloaded"],
+        "user latency has the wrong mode inventory",
+    )
+    for mode, background in zip(modes, (14, 52), strict=True):
+        require(isinstance(mode, dict), "user latency mode is not an object")
+        require(
+            int(mode.get("background_clients", -1)) == background
+            and int(mode.get("samples_per_prompt", -1)) == 5
+            and int(mode.get("measured_user_clients", -1)) == 15
+            and int(mode.get("request_errors", -1)) == 0
+            and float(mode.get("preemptions_delta", math.inf)) == 0,
+            "user latency used the wrong pressure or recorded a failure",
+        )
+        samples = mode.get("samples")
+        require(
+            isinstance(samples, list) and len(samples) == 15,
+            "user latency has the wrong sample count",
+        )
+        for sample in samples:
+            require(
+                isinstance(sample, dict)
+                and int(sample.get("prompt_tokens", -1)) in {2000, 4000, 6000}
+                and int(sample.get("completion_tokens", -1)) == 128
+                and 0
+                < float(sample.get("ttft_seconds", 0))
+                <= float(sample.get("end_to_end_seconds", -1))
+                and float(sample.get("decode_tokens_per_second", 0)) > 0,
+                "user latency contains an invalid measured request",
+            )
+        if mode.get("mode") == "overloaded":
+            require(
+                max(int(sample.get("waiting_at_arrival", 0)) for sample in samples) > 0,
+                "overloaded user latency did not exercise queueing",
+            )
+
+
+def validate_warm_latency(payload: dict[str, Any]) -> None:
+    require(payload.get("status") == "pass", "warm latency did not pass")
+    require(
+        int(payload.get("clients", -1)) == EXPECTED_CONCURRENCY
+        and int(payload.get("completion_tokens_requested", -1)) == 100
+        and float(payload.get("preemptions_delta", math.inf)) == 0,
+        "warm latency used the wrong cohort or recorded preemption",
+    )
+    for phase_name in ("cold", "warm_delta"):
+        phase = payload.get(phase_name)
+        require(isinstance(phase, dict), f"warm latency lacks {phase_name}")
+        pressure = phase.get("pressure")
+        grouped = phase.get("by_prompt_tokens")
+        require(
+            isinstance(pressure, dict)
+            and float(pressure.get("max_running", 0)) >= EXPECTED_CONCURRENCY
+            and isinstance(grouped, dict)
+            and set(grouped) == {"2000", "4000", "6000"},
+            f"warm latency {phase_name} lacks full-pressure evidence",
+        )
+        for target, summary in grouped.items():
+            require(
+                isinstance(summary, dict)
+                and int(summary.get("samples", 0)) >= 12
+                and 0
+                < float(summary.get("ttft_p50_seconds", 0))
+                <= float(summary.get("ttft_p95_seconds", -1))
+                and 0
+                < float(summary.get("end_to_end_p50_seconds", 0))
+                <= float(summary.get("end_to_end_p95_seconds", -1))
+                and float(summary.get("decode_p05_tokens_per_second", 0)) > 0,
+                f"warm latency {phase_name} {target} summary is invalid",
+            )
+
+
 def validate_churn(payload: dict[str, Any]) -> None:
     require(payload.get("status") == "pass", "churn did not pass")
     require(float(payload.get("duration_seconds", 0)) >= 900, "churn was too short")
@@ -1129,10 +1370,14 @@ def finalize(release_dir: Path) -> dict[str, Any]:
         "initial_contract": object_artifact("short/chat-contract.json"),
         "prefill_37x1": object_artifact("short/prefill-37x1.json"),
         "prefill_30x8": object_artifact("short/prefill-30x8.json"),
+        "queue_stress": object_artifact("queue-stress.json"),
+        "user_latency": object_artifact("user-latency.json"),
+        "warm_latency": object_artifact("warm-latency.json"),
         "churn": object_artifact("churn.json"),
         "post_churn_contract": object_artifact("post-churn-chat-contract.json"),
         "cuda_identity": object_artifact("cuda-oracle.json"),
         "candidate_host": object_artifact("candidate-host.json"),
+        "image_receipt": object_artifact("image-receipt.json"),
     }
 
     container_relatives = (
@@ -1170,6 +1415,11 @@ def finalize(release_dir: Path) -> dict[str, Any]:
     cuda_verification, cuda_gpu, cuda_host = validate_cuda_identity(
         evidence["cuda_identity"], artifacts["cuda-oracle.log"], containers[0]
     )
+    validate_image_receipt(
+        evidence["image_receipt"],
+        container=containers[0],
+        image_verification=cuda_verification,
+    )
     validate_b01_summary(recomputed_b01, containers[0])
     validate_prefill_interference(
         evidence["prefill_37x1"],
@@ -1194,7 +1444,25 @@ def finalize(release_dir: Path) -> dict[str, Any]:
     candidate_gpu, candidate_host = validate_candidate_host(
         evidence["candidate_host"], containers[0], cuda_gpu, cuda_host
     )
+    for label, key in (
+        ("initial chat contract", "initial_contract"),
+        ("queue stress", "queue_stress"),
+        ("user latency", "user_latency"),
+        ("warm latency", "warm_latency"),
+        ("churn", "churn"),
+        ("post-churn chat contract", "post_churn_contract"),
+    ):
+        validate_bound_identity(
+            evidence[key],
+            container=containers[0],
+            release_nonce=recomputed_b01["release_nonce"],
+            expected_gpu=cuda_gpu,
+            label=label,
+        )
     validate_chat_contract(evidence["initial_contract"])
+    validate_queue_stress(evidence["queue_stress"])
+    validate_user_latency(evidence["user_latency"])
+    validate_warm_latency(evidence["warm_latency"])
     validate_churn(evidence["churn"])
     validate_chat_contract(evidence["post_churn_contract"])
 
@@ -1229,6 +1497,11 @@ def finalize(release_dir: Path) -> dict[str, Any]:
         )
         server_fields = dict(server_pairs)
         require(
+            server_fields.get("image_receipt_sha256")
+            == sha256_bytes(artifacts["image-receipt.json"]),
+            f"{relative} has the wrong image receipt identity",
+        )
+        require(
             server_fields.get("model_manifest_sha256")
             == EXPECTED_PROFILE["VERSE_MODEL_MANIFEST_SHA256"]
             and SHA256_RE.fullmatch(server_fields.get("model_config_sha256", ""))
@@ -1259,6 +1532,20 @@ def finalize(release_dir: Path) -> dict[str, Any]:
             "shapes": ["37x1", "30x8"],
             "scope": "current_profile_prefill_interference",
         },
+        "queue_stress": {
+            "active_capacity": EXPECTED_CONCURRENCY,
+            "overflow_clients": 76,
+            "minimum_stress_seconds": 120,
+        },
+        "user_latency": {
+            "prompt_tokens": [2000, 4000, 6000],
+            "samples_per_prompt_per_mode": 5,
+            "modes": ["saturated", "overloaded"],
+        },
+        "warm_latency": {
+            "prompt_tokens": [2000, 4000, 6000],
+            "clients": EXPECTED_CONCURRENCY,
+        },
         "container": {
             "id": identity[0],
             "image_id": identity[1],
@@ -1274,6 +1561,7 @@ def finalize(release_dir: Path) -> dict[str, Any]:
             "test_count": len(evidence["cuda_identity"]["tests"]),
         },
         "source_commit": expected_commit,
+        "image_receipt_sha256": hashes["image-receipt.json"],
         "model_revision": EXPECTED_PROFILE["VERSE_MODEL_REVISION"],
         "artifacts_sha256": hashes,
         "qualification_tools_sha256": qualification_tool_hashes,

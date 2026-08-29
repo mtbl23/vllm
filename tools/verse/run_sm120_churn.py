@@ -23,6 +23,7 @@ from check_sm120_chat_contract import (
     load_key,
     validate_endpoint,
 )
+from sm120_evidence_identity import add_identity_arguments, validated_identity
 
 OPENER = urllib.request.build_opener(
     urllib.request.ProxyHandler({}), NoRedirectHandler()
@@ -365,7 +366,9 @@ def main() -> int:
     parser.add_argument("--concurrency", type=int, default=38)
     parser.add_argument("--prompt-pool-size", type=int, default=64)
     parser.add_argument("--metrics-interval-seconds", type=float, default=1.0)
+    add_identity_arguments(parser)
     args = parser.parse_args()
+    identity = validated_identity(args)
     try:
         require(args.duration_seconds >= 60, "duration must be at least 60 seconds")
         require(args.concurrency == 38, "the fixed churn gate requires 38 workers")
@@ -478,6 +481,7 @@ def main() -> int:
         json.dumps(
             {
                 "status": "pass",
+                **identity,
                 "duration_seconds": round(time.monotonic() - started, 3),
                 "concurrency": args.concurrency,
                 "prompt_pool_size": args.prompt_pool_size,

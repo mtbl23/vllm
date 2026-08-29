@@ -17,6 +17,7 @@ require_env VERSE_VLLM_EXPECTED_COMMIT
 require_env VERSE_VLLM_IMAGE
 require_env VERSE_VLLM_CONTAINER_ID
 require_env VERSE_VLLM_GPU_UUID
+require_env VERSE_VLLM_IMAGE_RECEIPT
 
 "$ROOT/tools/verse/verify_sm120_source.sh" "$VERSE_VLLM_EXPECTED_COMMIT" \
   >/dev/null
@@ -67,6 +68,8 @@ if [[ -e $VERSE_VLLM_RELEASE_DIR ]] &&
   exit 1
 fi
 install -d -m 0750 "$VERSE_VLLM_RELEASE_DIR"
+install -m 0600 "$VERSE_VLLM_IMAGE_RECEIPT" \
+  "$VERSE_VLLM_RELEASE_DIR/image-receipt.json"
 
 export VERSE_VLLM_RELEASE_NONCE
 VERSE_VLLM_RELEASE_NONCE=$(uv run --no-project python -c \
@@ -96,26 +99,6 @@ ENDPOINT=$(awk -F= '$1 == "endpoint" {print $2}' \
   exit 1
 }
 
-uv run --script "$ROOT/tools/verse/run_sm120_churn.py" \
-  --endpoint "$ENDPOINT" \
-  --model verse-free \
-  --api-key-file "$VERSE_VLLM_API_KEY_FILE" \
-  --duration-seconds 900 \
-  --concurrency 38 \
-  --prompt-pool-size 64 \
-  >"$VERSE_VLLM_RELEASE_DIR/churn.json"
-
-uv run --script "$ROOT/tools/verse/check_sm120_chat_contract.py" \
-  --endpoint "$ENDPOINT" \
-  --model verse-free \
-  --api-key-file "$VERSE_VLLM_API_KEY_FILE" \
-  >"$VERSE_VLLM_RELEASE_DIR/post-churn-chat-contract.json"
-
-"$ROOT/tools/verse/check_sm120_server.sh" \
-  >"$VERSE_VLLM_RELEASE_DIR/post-churn-server.txt"
-docker inspect "$VERSE_VLLM_CONTAINER_ID" \
-  >"$VERSE_VLLM_RELEASE_DIR/container-after-churn.json"
-
 CANDIDATE_GPU_IDENTITY=$(docker exec "$VERSE_VLLM_CONTAINER_ID" nvidia-smi \
   --query-gpu=name,uuid,memory.total,driver_version \
   --format=csv,noheader,nounits)
@@ -123,6 +106,65 @@ CANDIDATE_GPU_IDENTITY=$(docker exec "$VERSE_VLLM_CONTAINER_ID" nvidia-smi \
   echo "candidate container did not expose exactly one GPU identity" >&2
   exit 1
 }
+IDENTITY_ARGS=(
+  --image-digest "$VERSE_VLLM_IMAGE"
+  --fork-commit "$VERSE_VLLM_EXPECTED_COMMIT"
+  --model-revision "$VERSE_MODEL_REVISION"
+  --gpu-name "$CANDIDATE_GPU_IDENTITY"
+  --release-nonce "$VERSE_VLLM_RELEASE_NONCE"
+  --container-id "$VERSE_VLLM_CONTAINER_ID"
+)
+
+uv run --script "$ROOT/tools/verse/run_sm120_queue_stress.py" \
+  --endpoint "$ENDPOINT" \
+  --model verse-free \
+  --api-key-file "$VERSE_VLLM_API_KEY_FILE" \
+  --phase-seconds 60 \
+  --active-capacity 38 \
+  --overflow-clients 76 \
+  --prompt-pool-size 96 \
+  "${IDENTITY_ARGS[@]}" \
+  >"$VERSE_VLLM_RELEASE_DIR/queue-stress.json"
+
+uv run --script "$ROOT/tools/verse/run_sm120_user_latency.py" \
+  --endpoint "$ENDPOINT" \
+  --model verse-free \
+  --api-key-file "$VERSE_VLLM_API_KEY_FILE" \
+  --samples-per-prompt 5 \
+  "${IDENTITY_ARGS[@]}" \
+  >"$VERSE_VLLM_RELEASE_DIR/user-latency.json"
+
+uv run --script "$ROOT/tools/verse/run_sm120_warm_latency.py" \
+  --endpoint "$ENDPOINT" \
+  --model verse-free \
+  --api-key-file "$VERSE_VLLM_API_KEY_FILE" \
+  --clients 38 \
+  --max-tokens 100 \
+  "${IDENTITY_ARGS[@]}" \
+  >"$VERSE_VLLM_RELEASE_DIR/warm-latency.json"
+
+uv run --script "$ROOT/tools/verse/run_sm120_churn.py" \
+  --endpoint "$ENDPOINT" \
+  --model verse-free \
+  --api-key-file "$VERSE_VLLM_API_KEY_FILE" \
+  --duration-seconds 900 \
+  --concurrency 38 \
+  --prompt-pool-size 64 \
+  "${IDENTITY_ARGS[@]}" \
+  >"$VERSE_VLLM_RELEASE_DIR/churn.json"
+
+uv run --script "$ROOT/tools/verse/check_sm120_chat_contract.py" \
+  --endpoint "$ENDPOINT" \
+  --model verse-free \
+  --api-key-file "$VERSE_VLLM_API_KEY_FILE" \
+  "${IDENTITY_ARGS[@]}" \
+  >"$VERSE_VLLM_RELEASE_DIR/post-churn-chat-contract.json"
+
+"$ROOT/tools/verse/check_sm120_server.sh" \
+  >"$VERSE_VLLM_RELEASE_DIR/post-churn-server.txt"
+docker inspect "$VERSE_VLLM_CONTAINER_ID" \
+  >"$VERSE_VLLM_RELEASE_DIR/container-after-churn.json"
+
 DOCKER_HOST_ID=$(docker info --format '{{.ID}}')
 DOCKER_HOST_NAME=$(docker info --format '{{.Name}}')
 CANDIDATE_HOST_TMP="$VERSE_VLLM_RELEASE_DIR/.candidate-host.json.tmp"

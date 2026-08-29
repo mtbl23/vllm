@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,11 +18,14 @@ VALIDATOR = ROOT / "tools" / "verse" / "validate_sm120_container.py"
 RUNNER = ROOT / "tools" / "verse" / "run_sm120_server.sh"
 CHECKER = ROOT / "tools" / "verse" / "check_sm120_server.sh"
 IMAGE_VERIFIER = ROOT / "tools" / "verse" / "verify_sm120_image.py"
+IMAGE_RECEIPT = ROOT / "tools" / "verse" / "sm120_image_receipt.py"
+WHEEL_IDENTITY = ROOT / "tools" / "verse" / "build_sm120_wheel_identity.py"
 COMMIT = "2" * 40
 CONTAINER_ID = "c" * 64
 IMAGE = f"registry/runtime@sha256:{'a' * 64}"
 REVISION = "e2c6cd9c3302e91c032a378a607009c82ba16fac"
 GPU_UUID = "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+IMAGE_RECEIPT_SHA256 = "d" * 64
 MANIFEST_SHA256 = hashlib.sha256(
     (ROOT / "requirements/verse-sm120-flashinfer.lock").read_bytes()
 ).hexdigest()
@@ -31,6 +35,28 @@ MANIFEST_SHA256 = hashlib.sha256(
 def image_verifier():
     spec = importlib.util.spec_from_file_location(
         "verse_sm120_image_verifier", IMAGE_VERIFIER
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def image_receipt():
+    spec = importlib.util.spec_from_file_location(
+        "verse_sm120_image_receipt", IMAGE_RECEIPT
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def wheel_identity():
+    spec = importlib.util.spec_from_file_location(
+        "verse_sm120_wheel_identity", WHEEL_IDENTITY
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -68,6 +94,7 @@ def base_container(tmp_path: Path) -> tuple[dict, list[str]]:
                 "profile": "sm120-gemma4-nvfp4-v4",
                 "gpu_device": "0",
                 "gpu_uuid": GPU_UUID,
+                "image_receipt_sha256": IMAGE_RECEIPT_SHA256,
             },
             sort_keys=True,
         )
@@ -242,6 +269,8 @@ def base_container(tmp_path: Path) -> tuple[dict, list[str]]:
         str(model_directory),
         "--api-key-file",
         str(secret),
+        "--image-receipt-sha256",
+        IMAGE_RECEIPT_SHA256,
     ]
     return container, args
 
@@ -350,6 +379,7 @@ def test_container_rejects_api_key_in_config(tmp_path: Path):
         "VLLM_BATCH_INVARIANT=0",
         "VLLM_BATCH_INVARIANT=1",
         "VLLM_DISABLED_KERNELS=FlashInferB12xNvFp4LinearKernel",
+        "VLLM_SERVER_DEV_MODE=1",
         "VLLM_TEST_FORCE_FP8_MARLIN=1",
     ),
 )
@@ -408,8 +438,20 @@ def test_image_verifier_records_exact_native_and_wheel_identity(
     vllm_root.mkdir(parents=True)
     native = vllm_root / "_C_stable_libtorch.abi3.so"
     native.write_bytes(b"exact-native-extension")
-    wheel_manifest = tmp_path / "vllm-wheel.sha256"
-    wheel_manifest.write_text(f"{'a' * 64}  dist/vllm-test.whl\n")
+    wheel_manifest = tmp_path / "vllm-wheel.json"
+    wheel_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "wheel": {"filename": "vllm-test.whl", "sha256": "a" * 64},
+                "native_extension": {
+                    "member": "vllm/_C_stable_libtorch.abi3.so",
+                    "bytes": native.stat().st_size,
+                    "sha256": hashlib.sha256(native.read_bytes()).hexdigest(),
+                },
+            }
+        )
+    )
     monkeypatch.setattr(
         image_verifier.importlib.util,
         "find_spec",
@@ -420,6 +462,7 @@ def test_image_verifier_records_exact_native_and_wheel_identity(
 
     assert identity["native_extension"] == {
         "path": str(native),
+        "wheel_member": "vllm/_C_stable_libtorch.abi3.so",
         "bytes": native.stat().st_size,
         "sha256": hashlib.sha256(native.read_bytes()).hexdigest(),
     }
@@ -430,10 +473,101 @@ def test_image_verifier_records_exact_native_and_wheel_identity(
     }
 
 
+def test_wheel_identity_binds_native_extension_bytes(tmp_path: Path, wheel_identity):
+    wheel = tmp_path / "vllm-test.whl"
+    native = b"exact-native-extension"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("vllm/_C_stable_libtorch.abi3.so", native)
+
+    identity = wheel_identity.build_identity(wheel)
+
+    assert identity["wheel"]["sha256"] == hashlib.sha256(wheel.read_bytes()).hexdigest()
+    assert identity["native_extension"] == {
+        "member": "vllm/_C_stable_libtorch.abi3.so",
+        "bytes": len(native),
+        "sha256": hashlib.sha256(native).hexdigest(),
+    }
+
+
+def test_image_verifier_rejects_native_unrelated_to_wheel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, image_verifier
+):
+    vllm_root = tmp_path / "site-packages" / "vllm"
+    vllm_root.mkdir(parents=True)
+    native = vllm_root / "_C_stable_libtorch.abi3.so"
+    native.write_bytes(b"substituted-native-extension")
+    manifest = tmp_path / "vllm-wheel.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "wheel": {"filename": "vllm-test.whl", "sha256": "a" * 64},
+                "native_extension": {
+                    "member": "vllm/_C_stable_libtorch.abi3.so",
+                    "bytes": len(b"expected-native-extension"),
+                    "sha256": hashlib.sha256(b"expected-native-extension").hexdigest(),
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(
+        image_verifier.importlib.util,
+        "find_spec",
+        lambda _name: SimpleNamespace(origin=str(native)),
+    )
+
+    with pytest.raises(SystemExit, match="does not match the declared wheel"):
+        image_verifier.verify_vllm_binary_identity(vllm_root, manifest)
+
+
+def test_external_image_receipt_binds_digest_and_runtime_binary(
+    tmp_path: Path, image_receipt
+):
+    verification = tmp_path / "verification.json"
+    verification.write_text(
+        json.dumps(
+            {
+                "status": "valid",
+                "vllm_binary_identity": {
+                    "wheel_artifact": {
+                        "filename": "vllm-test.whl",
+                        "sha256": "1" * 64,
+                        "manifest_sha256": "2" * 64,
+                    },
+                    "native_extension": {
+                        "wheel_member": "vllm/_C_stable_libtorch.abi3.so",
+                        "sha256": "3" * 64,
+                    },
+                },
+            }
+        )
+    )
+    output = tmp_path / "receipt.json"
+    args = SimpleNamespace(
+        output=output.resolve(),
+        verification=verification.resolve(),
+        image=IMAGE,
+        fork_commit=COMMIT,
+        runtime_profile="sm120-gemma4-nvfp4-v4",
+        source_archive_sha256="4" * 64,
+        vllm_wheel_version=f"0.28.0+verse.{COMMIT[:12]}",
+    )
+    image_receipt.create_receipt(args)
+    args.receipt = output.resolve()
+
+    image_receipt.verify_receipt(args)
+    payload = json.loads(output.read_text())
+    payload["binary_identity"]["native_extension_sha256"] = "5" * 64
+    output.write_text(json.dumps(payload))
+    output.chmod(0o600)
+
+    with pytest.raises(ValueError, match="runtime binary identity differs"):
+        image_receipt.verify_receipt(args)
+
+
 @pytest.mark.parametrize(
     "wheel_entry",
     (
-        "vllm-test.whl",
         "../vllm-test.whl",
         "dist/subdir/vllm-test.whl",
         "dist/not-a-wheel.txt",
@@ -449,8 +583,20 @@ def test_image_verifier_rejects_noncanonical_wheel_identity_path(
     vllm_root.mkdir(parents=True)
     native = vllm_root / "_C_stable_libtorch.abi3.so"
     native.write_bytes(b"exact-native-extension")
-    wheel_manifest = tmp_path / "vllm-wheel.sha256"
-    wheel_manifest.write_text(f"{'a' * 64}  {wheel_entry}\n")
+    wheel_manifest = tmp_path / "vllm-wheel.json"
+    wheel_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "wheel": {"filename": wheel_entry, "sha256": "a" * 64},
+                "native_extension": {
+                    "member": "vllm/_C_stable_libtorch.abi3.so",
+                    "bytes": native.stat().st_size,
+                    "sha256": hashlib.sha256(native.read_bytes()).hexdigest(),
+                },
+            }
+        )
+    )
     monkeypatch.setattr(
         image_verifier.importlib.util,
         "find_spec",
@@ -486,6 +632,7 @@ def test_image_verifier_rejects_markers_on_exact_wheel_requirements(
         "FLASHINFER_DISABLE_VERSION_CHECK",
         "VLLM_BATCH_INVARIANT",
         "VLLM_DISABLED_KERNELS",
+        "VLLM_SERVER_DEV_MODE",
         "VLLM_TEST_FORCE_FP8_MARLIN",
     ),
 )

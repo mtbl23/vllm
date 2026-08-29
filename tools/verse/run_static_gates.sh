@@ -28,11 +28,17 @@ PYTHON_FILES=(
   tests/v1/attention/test_gemma4_nvfp4_flashinfer_routing.py
   tests/v1/attention/test_nvfp4_flashinfer_vosplit.py
   tools/verse/prepare_sm120_model.py
+  tools/verse/build_sm120_wheel_identity.py
   tools/verse/finalize_sm120_release.py
   tools/verse/evaluate_sm120_acceptance.py
   tools/verse/check_sm120_chat_contract.py
   tools/verse/download_sm120_model.py
   tools/verse/run_sm120_churn.py
+  tools/verse/run_sm120_queue_stress.py
+  tools/verse/run_sm120_user_latency.py
+  tools/verse/run_sm120_warm_latency.py
+  tools/verse/sm120_evidence_identity.py
+  tools/verse/sm120_image_receipt.py
   tools/verse/validate_sm120_container.py
   tools/verse/validate_sm120_profile.py
   tools/verse/verify_sm120_image.py

@@ -100,6 +100,7 @@ def _capacity_proof_lines(
 
 def test_parse_sse_proves_exact_completion_length_and_finish_reason():
     first_token_notifications = 0
+    completion_progress = []
 
     def notify_first_token():
         nonlocal first_token_notifications
@@ -110,12 +111,14 @@ def test_parse_sse_proves_exact_completion_length_and_finish_reason():
         expected_completion_tokens=2,
         expected_finish_reason="length",
         on_first_completion_token=notify_first_token,
+        on_completion_progress=completion_progress.append,
     )
 
     assert result["completion_tokens"] == 2
     assert result["usage_completion_tokens"] == 2
     assert result["finish_reason"] == "length"
     assert first_token_notifications == 1
+    assert completion_progress == [1, 2]
 
 
 @pytest.mark.parametrize(
@@ -335,6 +338,7 @@ def test_capacity_probe_overlaps_all_requests_and_observes_running(monkeypatch):
     def stream_chat(*args, **kwargs):
         nonlocal active, maximum_active
         kwargs["on_first_completion_token"]()
+        kwargs["on_completion_progress"](MODULE.CAPACITY_COMPLETION_TOKENS - 1)
         with lock:
             active += 1
             maximum_active = max(maximum_active, active)
@@ -384,6 +388,9 @@ def test_capacity_probe_overlaps_all_requests_and_observes_running(monkeypatch):
     assert result["simultaneous_decoding_streams"] == concurrency
     assert result["kv_cache_usage_at_simultaneous_decode"] == 0.75
     assert result["concurrent_6144_completion_proven"] is True
+    assert result["concurrent_6143_residency_proven"] is True
+    assert result["simultaneous_resident_context_tokens_per_request"] == 6143
+    assert result["kv_cache_usage_at_simultaneous_6143"] == 0.75
     assert result["verified_exact_completion_streams"] == concurrency
     assert (
         result["observed_completion_tokens_total"]

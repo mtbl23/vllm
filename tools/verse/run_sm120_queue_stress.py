@@ -11,7 +11,11 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from check_sm120_chat_contract import exact_context_messages, load_key, validate_endpoint
+from check_sm120_chat_contract import (
+    exact_context_messages,
+    load_key,
+    validate_endpoint,
+)
 from run_sm120_churn import (
     Totals,
     WorkerProgress,
@@ -21,6 +25,7 @@ from run_sm120_churn import (
     validate_worker_progress,
     worker,
 )
+from sm120_evidence_identity import add_identity_arguments, validated_identity
 
 
 def build_prompt_pool(
@@ -107,7 +112,10 @@ def run_phase(
             now = time.monotonic()
             if now >= next_sample:
                 samples.append(
-                    {"elapsed_seconds": time.monotonic() - started, **fetch_metrics(endpoint)}
+                    {
+                        "elapsed_seconds": time.monotonic() - started,
+                        **fetch_metrics(endpoint),
+                    }
                 )
                 next_sample += metrics_interval_seconds
             stop.wait(min(0.1, max(0.0, deadline - time.monotonic())))
@@ -173,10 +181,13 @@ def run_phase(
             )
             if index:
                 require(
-                    sample["generation_tokens"] >= samples[index - 1]["generation_tokens"],
+                    sample["generation_tokens"]
+                    >= samples[index - 1]["generation_tokens"],
                     f"{name} generation counter decreased",
                 )
-        generation_delta = samples[-1]["generation_tokens"] - samples[0]["generation_tokens"]
+        generation_delta = (
+            samples[-1]["generation_tokens"] - samples[0]["generation_tokens"]
+        )
         require(generation_delta > 0, f"{name} made no decode progress")
         metrics_evidence = {
             "metrics_samples": len(samples),
@@ -223,7 +234,9 @@ def main() -> int:
     parser.add_argument("--overflow-clients", type=int, default=76)
     parser.add_argument("--prompt-pool-size", type=int, default=96)
     parser.add_argument("--metrics-interval-seconds", type=float, default=1.0)
+    add_identity_arguments(parser)
     args = parser.parse_args()
+    identity = validated_identity(args)
 
     require(args.phase_seconds >= 60, "each phase must run for at least 60 seconds")
     require(args.active_capacity == 38, "this appliance gate requires 38 active slots")
@@ -270,6 +283,7 @@ def main() -> int:
         json.dumps(
             {
                 "status": "pass",
+                **identity,
                 "stress_seconds": args.phase_seconds * 2,
                 "wall_seconds_including_setup_and_drain": round(
                     time.monotonic() - overall_started, 3

@@ -49,7 +49,8 @@ All conditions must be true before routing one production request:
    port 8080.
 7. The exact rollback target is the recorded healthy old tunnel UUID.
 8. The stable DNS record is the exact expected proxied CNAME and no deployment
-   or DNS automation can race the cutover.
+   or DNS automation can race the cutover. All Verse route changes use the same
+   owner-only local deployment lock.
 9. No lifecycle command used below can select an instance by a mutable label,
    partial name, wildcard, or unresolved environment variable.
 
@@ -118,11 +119,16 @@ and invocation routes all return 404 through the public origin.
      --target-tunnel "$NEW_TUNNEL_ID" \
      --api-token-file "$CF_DNS_EDIT_TOKEN_FILE" \
      --receipt "$CHANGE_RECORD_DIR/cutover-route.json" \
+     --lock "$CHANGE_RECORD_DIR/free-route.lock" \
      --apply
    ```
 
-3. Require the command's verified readback and owner-only receipt. A current
-   target mismatch aborts without mutation.
+3. Require the command's verified readback and owner-only receipt. The tool
+   reserves a durable pending receipt before mutation, acquires the deployment
+   lock, and repeats the exact record and `modified_on` check immediately before
+   PATCH. A mismatch aborts without mutation. Cloudflare's DNS record API does
+   not expose a server-side compare-and-swap precondition, so no operator or
+   external automation may edit this record outside the locked tool.
 4. Send one authenticated synthetic canary through the public Verse Free path.
 5. Confirm streaming content, `[DONE]`, the expected model alias, and no retry
    to another model.
@@ -161,6 +167,7 @@ Do not diagnose in place while users remain routed to a failing candidate.
      --target-tunnel "$OLD_TUNNEL_ID" \
      --api-token-file "$CF_DNS_EDIT_TOKEN_FILE" \
      --receipt "$CHANGE_RECORD_DIR/rollback-route.json" \
+     --lock "$CHANGE_RECORD_DIR/free-route.lock" \
      --apply
    ```
 

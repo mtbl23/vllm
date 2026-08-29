@@ -32,13 +32,15 @@ EXPECTED_FLASHINFER_REQUIREMENT_URL = (
     "#sha256=50ad966220b5160f17fcb9e064bdfbcda726ec779fb0c74fd3449b3c48c66600"
 )
 VLLM_WHEEL_VERSION_RE = re.compile(r"0\.28\.0\+verse\.[0-9a-f]{12}")
-VLLM_WHEEL_IDENTITY_MANIFEST = Path("/opt/verse/identity/vllm-wheel.sha256")
+NATIVE_MEMBER_RE = re.compile(r"vllm/_C_stable_libtorch(?:\.[^.]+)*\.so")
+VLLM_WHEEL_IDENTITY_MANIFEST = Path("/opt/verse/identity/vllm-wheel.json")
 FORBIDDEN_RUNTIME_ENVIRONMENT_NAMES = frozenset(
     {
         "FLASHINFER_CUBIN_DIR",
         "FLASHINFER_DISABLE_VERSION_CHECK",
         "VLLM_BATCH_INVARIANT",
         "VLLM_DISABLED_KERNELS",
+        "VLLM_SERVER_DEV_MODE",
         "VLLM_TEST_FORCE_FP8_MARLIN",
     }
 )
@@ -94,25 +96,48 @@ def verify_vllm_binary_identity(
         wheel_manifest.is_file() and not wheel_manifest.is_symlink(),
         "vLLM wheel identity manifest is absent",
     )
-    fields = wheel_manifest.read_text(encoding="utf-8").strip().split()
-    wheel_path = Path(fields[1]) if len(fields) == 2 else None
+    try:
+        manifest = json.loads(wheel_manifest.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeError) as error:
+        raise SystemExit("vLLM wheel identity manifest is malformed") from error
+    wheel = manifest.get("wheel") if isinstance(manifest, dict) else None
+    native = manifest.get("native_extension") if isinstance(manifest, dict) else None
     require(
-        len(fields) == 2
-        and re.fullmatch(r"[0-9a-f]{64}", fields[0]) is not None
-        and wheel_path is not None
-        and wheel_path.parts == ("dist", wheel_path.name)
-        and wheel_path.name.endswith(".whl"),
+        isinstance(manifest, dict)
+        and set(manifest) == {"schema_version", "wheel", "native_extension"}
+        and manifest.get("schema_version") == 1
+        and isinstance(wheel, dict)
+        and set(wheel) == {"filename", "sha256"}
+        and isinstance(wheel.get("filename"), str)
+        and Path(wheel["filename"]).name == wheel["filename"]
+        and wheel["filename"].endswith(".whl")
+        and re.fullmatch(r"[0-9a-f]{64}", str(wheel.get("sha256", ""))) is not None
+        and isinstance(native, dict)
+        and set(native) == {"member", "bytes", "sha256"}
+        and isinstance(native.get("member"), str)
+        and NATIVE_MEMBER_RE.fullmatch(native["member"]) is not None
+        and isinstance(native.get("bytes"), int)
+        and native["bytes"] > 0
+        and re.fullmatch(r"[0-9a-f]{64}", str(native.get("sha256", ""))) is not None,
         "vLLM wheel identity manifest is malformed",
+    )
+    native_sha256 = sha256_file(native_path)
+    require(
+        native_path.name == Path(native["member"]).name
+        and native_path.stat().st_size == native["bytes"]
+        and native_sha256 == native["sha256"],
+        "loaded vLLM native extension does not match the declared wheel artifact",
     )
     return {
         "native_extension": {
             "path": str(native_path),
+            "wheel_member": native["member"],
             "bytes": native_path.stat().st_size,
-            "sha256": sha256_file(native_path),
+            "sha256": native_sha256,
         },
         "wheel_artifact": {
-            "filename": wheel_path.name,
-            "sha256": fields[0],
+            "filename": wheel["filename"],
+            "sha256": wheel["sha256"],
             "manifest_sha256": sha256_file(wheel_manifest),
         },
     }

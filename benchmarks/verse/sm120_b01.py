@@ -45,6 +45,7 @@ NO_REDIRECT_OPENER = urllib.request.build_opener(
 @dataclass(frozen=True)
 class MetricSnapshot:
     generated: float
+    prompted: float
     running: float
     waiting: float
     preemptions: float
@@ -54,6 +55,7 @@ class MetricSnapshot:
 class MetricSample:
     timestamp: float
     generated: float
+    prompted: float
     running: float
     waiting: float
     preemptions: float = 0.0
@@ -211,6 +213,7 @@ def completion(
 def parse_metrics(text: str) -> MetricSnapshot:
     series: dict[str, list[float]] = {
         "generated": [],
+        "prompted": [],
         "running": [],
         "waiting": [],
         "preemptions": [],
@@ -224,6 +227,8 @@ def parse_metrics(text: str) -> MetricSnapshot:
         normalized = name.replace(":", "_")
         if normalized.endswith("generation_tokens_total"):
             series["generated"].append(value)
+        elif normalized.endswith("prompt_tokens_total"):
+            series["prompted"].append(value)
         elif normalized.endswith("num_requests_running"):
             series["running"].append(value)
         elif normalized.endswith("num_requests_waiting"):
@@ -237,6 +242,7 @@ def parse_metrics(text: str) -> MetricSnapshot:
             )
     return MetricSnapshot(
         generated=series["generated"][0],
+        prompted=series["prompted"][0],
         running=series["running"][0],
         waiting=series["waiting"][0],
         preemptions=series["preemptions"][0],
@@ -296,6 +302,7 @@ def poll_metrics(
                 MetricSample(
                     time.monotonic(),
                     metrics.generated,
+                    metrics.prompted,
                     metrics.running,
                     metrics.waiting,
                     metrics.preemptions,
@@ -312,13 +319,14 @@ def longest_full_decode_window(
     interval: float,
     minimum_duration: float,
     minimum_samples: int,
-) -> tuple[float, float, int] | None:
+) -> tuple[float, float, int, float] | None:
     groups: list[list[MetricSample]] = []
     current: list[MetricSample] = []
     for sample in samples:
         valid = sample.running >= concurrency and sample.waiting == 0
-        contiguous = (
-            not current or sample.timestamp - current[-1].timestamp <= interval * 3
+        contiguous = not current or (
+            sample.timestamp - current[-1].timestamp <= interval * 3
+            and sample.prompted == current[-1].prompted
         )
         if valid and contiguous:
             current.append(sample)
@@ -335,7 +343,10 @@ def longest_full_decode_window(
     if duration < minimum_duration:
         return None
     throughput = (group[-1].generated - group[0].generated) / duration
-    return duration, throughput, len(group)
+    prompt_tokens_delta = group[-1].prompted - group[0].prompted
+    if prompt_tokens_delta != 0:
+        raise RuntimeError("steady decode window contains prompt-token progress")
+    return duration, throughput, len(group), prompt_tokens_delta
 
 
 def parse_args() -> argparse.Namespace:
@@ -486,7 +497,15 @@ def main() -> int:
         args.minimum_steady_seconds,
         args.minimum_steady_samples,
     )
-    steady_duration, steady_throughput, steady_samples = steady or (0.0, 0.0, 0)
+    steady_duration, steady_throughput, steady_samples, steady_prompt_delta = (
+        steady
+        or (
+            0.0,
+            0.0,
+            0,
+            -1.0,
+        )
+    )
     completed_requests = len(completion_tokens)
     generated = sum(completion_tokens)
     expected_generated = args.concurrency * args.output_tokens
@@ -563,6 +582,7 @@ def main() -> int:
         "minimum_wall_aggregate_tokens_per_second": round(minimum_wall, 3),
         "steady_window_seconds": round(steady_duration, 6),
         "steady_window_samples": steady_samples,
+        "steady_window_prompt_tokens_delta": steady_prompt_delta,
         "steady_aggregate_tokens_per_second": round(steady_throughput, 3),
         "minimum_aggregate_tokens_per_second": args.minimum_aggregate,
     }

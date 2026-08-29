@@ -51,6 +51,7 @@ def report(
         "preemption_error": None,
         "steady_window_seconds": 12.0,
         "steady_window_samples": 200,
+        "steady_window_prompt_tokens_delta": 0,
         "steady_aggregate_tokens_per_second": steady,
         "wall_aggregate_tokens_per_second": wall,
         "prewarmed": prewarmed,
@@ -150,3 +151,15 @@ def test_acceptance_rejects_release_nonce_drift():
         assert "release nonce changed" in str(exc)
     else:
         raise AssertionError("mixed release nonces were accepted")
+
+
+def test_acceptance_rejects_prefill_inside_decode_window():
+    reports = matrix()
+    reports[0] = dict(reports[0], steady_window_prompt_tokens_delta=1)
+
+    try:
+        MODULE.evaluate(reports)
+    except ValueError as exc:
+        assert "mixed prefill" in str(exc)
+    else:
+        raise AssertionError("prefill-contaminated decode window was accepted")

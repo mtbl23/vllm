@@ -43,8 +43,12 @@ VERSE_VLLM_BUILD_OUTPUT=push \
 tools/verse/build_sm120_image.sh
 ```
 
-The launcher never accepts mutable image tags. Push the candidate and use its
-registry digest even for disposable GPU validation.
+The launcher never accepts mutable image tags. The build workflow also emits an
+owner-controlled image receipt that binds the registry digest, fork commit,
+source archive, wheel artifact, and native extension bytes. Install that
+receipt as a root-owned mode-0600 file on every qualification or production
+host. Labels stored inside the candidate image are not accepted as independent
+provenance.
 
 ## Launch
 
@@ -73,18 +77,24 @@ Verse Free backend contract.
 ```bash
 export VERSE_VLLM_IMAGE='registry.example/verse-vllm@sha256:...'
 export VERSE_VLLM_EXPECTED_COMMIT='<40-character fork commit>'
+export VERSE_VLLM_IMAGE_RECEIPT='/run/verse-release/verse-sm120-image-receipt.json'
 export VERSE_MODEL_CACHE_DIR='/var/lib/verse-model-cache'
 export VERSE_VLLM_CACHE_DIR='/var/lib/verse-vllm-cache'
 export VERSE_VLLM_API_KEY_FILE='/run/verse-secrets/vllm-api-key'
 sudo chown 2000:0 "$VERSE_VLLM_API_KEY_FILE"
 sudo chmod 0600 "$VERSE_VLLM_API_KEY_FILE"
-sudo --preserve-env=VERSE_VLLM_IMAGE,VERSE_VLLM_EXPECTED_COMMIT,VERSE_MODEL_CACHE_DIR,VERSE_VLLM_CACHE_DIR,VERSE_VLLM_API_KEY_FILE \
+sudo chown root:root "$VERSE_VLLM_IMAGE_RECEIPT"
+sudo chmod 0600 "$VERSE_VLLM_IMAGE_RECEIPT"
+sudo --preserve-env=VERSE_VLLM_IMAGE,VERSE_VLLM_EXPECTED_COMMIT,VERSE_VLLM_IMAGE_RECEIPT,VERSE_MODEL_CACHE_DIR,VERSE_VLLM_CACHE_DIR,VERSE_VLLM_API_KEY_FILE \
   tools/verse/run_sm120_server.sh
 ```
 
 The API key file must be owned by UID 2000 with owner-only permissions. The
-launcher itself runs as root only to establish root-owned mount boundaries;
-the serving process runs as UID 2000/GID 0 with every Linux capability dropped.
+launcher verifies the external receipt before executing the image, then runs
+the image verifier in a networkless read-only container and requires the
+runtime wheel/native hashes to match that receipt. It runs as root only to
+establish root-owned mount boundaries; the serving process runs as UID 2000/GID
+0 with every Linux capability dropped.
 
 The container first starts with automatic restart disabled. The launcher waits
 for health, checks authenticated model discovery and strict kernel markers, and

@@ -12,6 +12,7 @@ resource by name. Production use is intentionally gated by ``--apply``.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -108,14 +109,41 @@ def _validate_record(
         )
 
 
-def _write_receipt(path: Path, payload: dict[str, Any]) -> None:
+def _reserve_receipt(path: Path, payload: dict[str, Any]) -> int:
     if not path.is_absolute() or path.exists():
         raise ValueError("receipt must be a new absolute path")
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+    encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
+    os.write(fd, encoded)
+    os.fsync(fd)
+    return fd
+
+
+def _finish_receipt(fd: int, payload: dict[str, Any]) -> None:
+    encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.ftruncate(fd, 0)
+    os.write(fd, encoded)
+    os.fsync(fd)
+
+
+def _acquire_lock(path: Path) -> int:
+    if not path.is_absolute() or path.is_symlink():
+        raise ValueError("cutover lock must be an absolute non-symlink path")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
+        os.close(fd)
+        raise ValueError("cutover lock must have exact mode 0600")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as error:
+        os.close(fd)
+        raise RuntimeError(
+            "another cutover operation holds the deployment lock"
+        ) from error
+    return fd
 
 
 def main() -> int:
@@ -128,6 +156,7 @@ def main() -> int:
     parser.add_argument("--target-tunnel")
     parser.add_argument("--api-token-file", type=Path, required=True)
     parser.add_argument("--receipt", type=Path)
+    parser.add_argument("--lock", type=Path)
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
 
@@ -167,43 +196,71 @@ def main() -> int:
         )
         return 0
 
-    if not args.apply or not args.target_tunnel or args.receipt is None:
-        parser.error("switch requires --apply, --target-tunnel, and --receipt")
+    if (
+        not args.apply
+        or not args.target_tunnel
+        or args.receipt is None
+        or args.lock is None
+    ):
+        parser.error("switch requires --apply, --target-tunnel, --receipt, and --lock")
     target = _tunnel_cname(args.target_tunnel)
     if target == current:
         parser.error("current and target tunnels must differ")
 
-    changed = _api_request(
-        method="PATCH",
-        path=path,
-        token=token,
-        payload={"content": target},
-    )
-    _validate_record(
-        changed,
-        record_id=args.record_id,
-        hostname=args.hostname,
-        expected_content=target,
-    )
-    readback = _api_request(method="GET", path=path, token=token)
-    _validate_record(
-        readback,
-        record_id=args.record_id,
-        hostname=args.hostname,
-        expected_content=target,
-    )
-    receipt = {
+    pending = {
         "schema_version": 1,
-        "status": "verified",
-        "changed_at": datetime.now(timezone.utc).isoformat(),
+        "status": "pending",
+        "prepared_at": datetime.now(timezone.utc).isoformat(),
         "zone_id": args.zone_id,
         "record_id": args.record_id,
         "hostname": args.hostname,
         "from_tunnel": args.expected_current_tunnel,
         "to_tunnel": args.target_tunnel,
-        "modified_on": readback.get("modified_on"),
+        "expected_modified_on": record.get("modified_on"),
     }
-    _write_receipt(args.receipt, receipt)
+    lock_fd = _acquire_lock(args.lock)
+    receipt_fd: int | None = None
+    try:
+        receipt_fd = _reserve_receipt(args.receipt, pending)
+        latest = _api_request(method="GET", path=path, token=token)
+        _validate_record(
+            latest,
+            record_id=args.record_id,
+            hostname=args.hostname,
+            expected_content=current,
+        )
+        if latest.get("modified_on") != record.get("modified_on"):
+            raise RuntimeError("DNS record changed after preflight; refusing mutation")
+        changed = _api_request(
+            method="PATCH",
+            path=path,
+            token=token,
+            payload={"content": target},
+        )
+        _validate_record(
+            changed,
+            record_id=args.record_id,
+            hostname=args.hostname,
+            expected_content=target,
+        )
+        readback = _api_request(method="GET", path=path, token=token)
+        _validate_record(
+            readback,
+            record_id=args.record_id,
+            hostname=args.hostname,
+            expected_content=target,
+        )
+        receipt = {
+            **pending,
+            "status": "verified",
+            "changed_at": datetime.now(timezone.utc).isoformat(),
+            "modified_on": readback.get("modified_on"),
+        }
+        _finish_receipt(receipt_fd, receipt)
+    finally:
+        if receipt_fd is not None:
+            os.close(receipt_fd)
+        os.close(lock_fd)
     print(json.dumps(receipt, sort_keys=True))
     return 0
 

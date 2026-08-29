@@ -18,6 +18,7 @@ SPEC.loader.exec_module(MODULE)
 def test_parse_metrics_accepts_vllm_colon_names():
     metrics = """
 vllm:generation_tokens_total{engine="0"} 125
+vllm:prompt_tokens_total{engine="0"} 250
 vllm:num_requests_running{engine="0"} 38
 vllm:num_requests_waiting{engine="0"} 0
 vllm:num_preemptions_total{engine="0"} 4
@@ -25,6 +26,7 @@ vllm:num_preemptions_total{engine="0"} 4
 
     assert MODULE.parse_metrics(metrics) == MODULE.MetricSnapshot(
         generated=125.0,
+        prompted=250.0,
         running=38.0,
         waiting=0.0,
         preemptions=4.0,
@@ -46,7 +48,7 @@ def test_require_server_idle_rejects_dirty_server(monkeypatch):
     monkeypatch.setattr(
         MODULE,
         "fetch_metrics",
-        lambda _endpoint: MODULE.MetricSnapshot(100.0, 1.0, 2.0, 3.0),
+        lambda _endpoint: MODULE.MetricSnapshot(100.0, 50.0, 1.0, 2.0, 3.0),
     )
 
     with pytest.raises(RuntimeError, match=r"running=1, waiting=2"):
@@ -61,42 +63,60 @@ def test_preemption_increase_is_rejected():
 def test_wait_for_idle_drains_busy_server(monkeypatch):
     snapshots = iter(
         [
-            MODULE.MetricSnapshot(100.0, 2.0, 1.0, 3.0),
-            MODULE.MetricSnapshot(110.0, 1.0, 0.0, 3.0),
-            MODULE.MetricSnapshot(120.0, 0.0, 0.0, 3.0),
+            MODULE.MetricSnapshot(100.0, 50.0, 2.0, 1.0, 3.0),
+            MODULE.MetricSnapshot(110.0, 60.0, 1.0, 0.0, 3.0),
+            MODULE.MetricSnapshot(120.0, 60.0, 0.0, 0.0, 3.0),
         ]
     )
     monkeypatch.setattr(MODULE, "fetch_metrics", lambda _endpoint: next(snapshots))
 
     assert MODULE.wait_for_idle("http://127.0.0.1:8000", 1.0, 0.0) == (
-        MODULE.MetricSnapshot(120.0, 0.0, 0.0, 3.0)
+        MODULE.MetricSnapshot(120.0, 60.0, 0.0, 0.0, 3.0)
     )
 
 
 def test_longest_full_decode_window_ignores_partial_batch():
     sample = MODULE.MetricSample
     samples = [
-        sample(0.0, 100.0, 20.0, 0.0),
-        sample(1.0, 200.0, 38.0, 0.0),
-        sample(2.0, 1200.0, 38.0, 0.0),
-        sample(3.0, 1300.0, 37.0, 1.0),
+        sample(0.0, 100.0, 1000.0, 20.0, 0.0),
+        sample(1.0, 200.0, 2000.0, 38.0, 0.0),
+        sample(2.0, 1200.0, 2000.0, 38.0, 0.0),
+        sample(3.0, 1300.0, 2000.0, 37.0, 1.0),
     ]
 
     assert MODULE.longest_full_decode_window(samples, 38, 0.5, 1.0, 2) == (
         1.0,
         1000.0,
         2,
+        0.0,
     )
 
 
 def test_short_transient_is_not_a_valid_steady_window():
     sample = MODULE.MetricSample
     samples = [
-        sample(0.0, 100.0, 38.0, 0.0),
-        sample(0.05, 150.0, 38.0, 0.0),
+        sample(0.0, 100.0, 1000.0, 38.0, 0.0),
+        sample(0.05, 150.0, 1000.0, 38.0, 0.0),
     ]
 
     assert MODULE.longest_full_decode_window(samples, 38, 0.05, 10.0, 50) is None
+
+
+def test_decode_window_excludes_samples_while_prompt_counter_changes():
+    sample = MODULE.MetricSample
+    samples = [
+        sample(0.0, 100.0, 1000.0, 38.0, 0.0),
+        sample(1.0, 300.0, 2000.0, 38.0, 0.0),
+        sample(2.0, 700.0, 2000.0, 38.0, 0.0),
+        sample(3.0, 1100.0, 2000.0, 38.0, 0.0),
+    ]
+
+    assert MODULE.longest_full_decode_window(samples, 38, 0.5, 1.0, 2) == (
+        2.0,
+        400.0,
+        3,
+        0.0,
+    )
 
 
 def test_endpoint_must_be_loopback():

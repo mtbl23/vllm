@@ -17,6 +17,7 @@ require_env VERSE_VLLM_CACHE_DIR
 require_env VERSE_MODEL_CACHE_DIR
 require_env VERSE_VLLM_API_KEY_FILE
 require_env VERSE_VLLM_ACCEPTANCE_DIR
+require_env VERSE_VLLM_IMAGE_RECEIPT
 
 "$ROOT/tools/verse/verify_sm120_source.sh" "$VERSE_VLLM_EXPECTED_COMMIT" \
   >/dev/null
@@ -71,6 +72,12 @@ uv run --script "$ROOT/tools/verse/check_sm120_chat_contract.py" \
   --endpoint "$ENDPOINT" \
   --model "$VERSE_SERVED_MODEL_NAME" \
   --api-key-file "$VERSE_VLLM_API_KEY_FILE" \
+  --image-digest "$VERSE_VLLM_IMAGE" \
+  --fork-commit "$VERSE_VLLM_EXPECTED_COMMIT" \
+  --model-revision "$VERSE_MODEL_REVISION" \
+  --gpu-name "$GPU_IDENTITY" \
+  --release-nonce "$RELEASE_NONCE" \
+  --container-id "$CONTAINER" \
   >"$VERSE_VLLM_ACCEPTANCE_DIR/chat-contract.json"
 
 REPORTS=()

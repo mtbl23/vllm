@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+source "$ROOT/tools/verse/sm120_sha256.bash"
 
 require_env() {
   local name=$1
@@ -18,6 +19,7 @@ require_env VERSE_MODEL_CACHE_DIR
 require_env VERSE_VLLM_API_KEY_FILE
 require_env VERSE_VLLM_GPU_UUID
 require_env VERSE_VLLM_CONTAINER_ID
+require_env VERSE_VLLM_IMAGE_RECEIPT
 
 "$ROOT/tools/verse/verify_sm120_source.sh" "$VERSE_VLLM_EXPECTED_COMMIT" \
   >/dev/null
@@ -55,6 +57,20 @@ PROFILE_SHELL=$(uv run --script "$ROOT/tools/verse/validate_sm120_profile.py" \
   --expected-commit "$VERSE_VLLM_EXPECTED_COMMIT" \
   --emit-shell)
 eval "$PROFILE_SHELL"
+EXPECTED_SOURCE_ARCHIVE=$(git -C "$ROOT" -c tar.umask=0000 archive --format=tar \
+  "$VERSE_VLLM_EXPECTED_COMMIT" | verse_sha256 | awk '{print $1}')
+EXPECTED_WHEEL_VERSION="0.28.0+verse.${VERSE_VLLM_EXPECTED_COMMIT:0:12}"
+RECEIPT_VERIFICATION=$(uv run --script \
+  "$ROOT/tools/verse/sm120_image_receipt.py" verify \
+  --image "$VERSE_VLLM_IMAGE" \
+  --fork-commit "$VERSE_VLLM_EXPECTED_COMMIT" \
+  --runtime-profile "$VERSE_RUNTIME_PROFILE" \
+  --source-archive-sha256 "$EXPECTED_SOURCE_ARCHIVE" \
+  --vllm-wheel-version "$EXPECTED_WHEEL_VERSION" \
+  --receipt "$VERSE_VLLM_IMAGE_RECEIPT")
+IMAGE_RECEIPT_SHA256=$(uv run --no-project python -c \
+  'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' \
+  <<<"$RECEIPT_VERIFICATION")
 SERVED_MODEL=$VERSE_SERVED_MODEL_NAME
 MODEL_READY=$(uv run --script "$ROOT/tools/verse/prepare_sm120_model.py" \
   --cache-dir "$VERSE_MODEL_CACHE_DIR" --verify-ready --require-root-owner)
@@ -101,6 +117,7 @@ validate_container() {
     --model-cache "$VERSE_MODEL_CACHE_DIR" \
     --model-directory "$MODEL_DIRECTORY" \
     --api-key-file "$VERSE_VLLM_API_KEY_FILE" \
+    --image-receipt-sha256 "$IMAGE_RECEIPT_SHA256" \
     --restart-policy "$EXPECTED_RESTART_POLICY" \
     <"$INSPECT" >"$VALIDATED"
 }
@@ -187,8 +204,9 @@ CURRENT_STARTED_AT=$(uv run --no-project python -c \
   exit 1
 }
 
-printf 'status=healthy\ncontainer_id=%s\nendpoint=%s\ncommit=%s\nprofile=%s\ngpu_uuid=%s\nmodel_manifest_sha256=%s\nmodel_config_sha256=%s\nmodel_ready_marker_sha256=%s\nmodel_file_count=%s\nmodel_bytes=%s\n' \
+printf 'status=healthy\ncontainer_id=%s\nendpoint=%s\ncommit=%s\nprofile=%s\ngpu_uuid=%s\nimage_receipt_sha256=%s\nmodel_manifest_sha256=%s\nmodel_config_sha256=%s\nmodel_ready_marker_sha256=%s\nmodel_file_count=%s\nmodel_bytes=%s\n' \
   "$CONTAINER_ID" "$ENDPOINT" "$VERSE_VLLM_EXPECTED_COMMIT" \
-  "$VERSE_RUNTIME_PROFILE" "$GPU_UUID" "$MODEL_MANIFEST_SHA256" \
+  "$VERSE_RUNTIME_PROFILE" "$GPU_UUID" "$IMAGE_RECEIPT_SHA256" \
+  "$MODEL_MANIFEST_SHA256" \
   "$MODEL_CONFIG_SHA256" "$MODEL_READY_MARKER_SHA256" \
   "$MODEL_FILE_COUNT" "$MODEL_BYTES"

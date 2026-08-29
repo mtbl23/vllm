@@ -26,7 +26,7 @@ from run_sm120_churn import (
     require,
     worker,
 )
-
+from sm120_evidence_identity import add_identity_arguments, validated_identity
 
 OPENER = urllib.request.build_opener(
     urllib.request.ProxyHandler({}), NoRedirectHandler()
@@ -109,7 +109,7 @@ def measured_request(
             raise ValueError("measured stream ended without [DONE]")
 
     require(first_content_at is not None, "measured request emitted no content")
-    require(completion_tokens is not None and completion_tokens > 0, "usage missing")
+    require(completion_tokens == 128, "measured request did not return 128 tokens")
     ttft = first_content_at - started
     end_to_end = ended - started
     decode_seconds = max(0.000001, ended - first_content_at)
@@ -140,8 +140,12 @@ def summarize(samples: list[dict[str, float | int]]) -> dict[str, float | int]:
         "end_to_end_max_seconds": round(max(end_to_end), 3),
         "decode_p50_tokens_per_second": round(percentile(decode, 0.50), 3),
         "decode_p05_tokens_per_second": round(percentile(decode, 0.05), 3),
-        "running_at_arrival_p50": round(percentile([float(v) for v in running], 0.50), 1),
-        "waiting_at_arrival_p50": round(percentile([float(v) for v in waiting], 0.50), 1),
+        "running_at_arrival_p50": round(
+            percentile([float(v) for v in running], 0.50), 1
+        ),
+        "waiting_at_arrival_p50": round(
+            percentile([float(v) for v in waiting], 0.50), 1
+        ),
         "waiting_at_arrival_max": max(waiting),
     }
 
@@ -201,16 +205,16 @@ def run_mode(
             f"{mode} failed to establish realistic background pressure",
         )
 
-        targets = [target for target in (2000, 4000, 6000) for _ in range(samples_per_prompt)]
+        targets = [
+            target for target in (2000, 4000, 6000) for _ in range(samples_per_prompt)
+        ]
         random.Random(22 if mode == "saturated" else 23).shuffle(targets)
         prompt_indexes = {2000: 0, 4000: 0, 6000: 0}
         measured_inputs: list[tuple[int, list[dict[str, str]]]] = []
         for target in targets:
             prompt_index = prompt_indexes[target]
             prompt_indexes[target] += 1
-            measured_inputs.append(
-                (target, probe_prompts[target][prompt_index])
-            )
+            measured_inputs.append((target, probe_prompts[target][prompt_index]))
         require(not errors, errors[0] if errors else f"{mode} background failed")
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=len(measured_inputs)
@@ -270,8 +274,12 @@ def main() -> int:
     parser.add_argument("--model", default="verse-free")
     parser.add_argument("--api-key-file", type=Path, required=True)
     parser.add_argument("--samples-per-prompt", type=int, default=8)
+    add_identity_arguments(parser)
     args = parser.parse_args()
-    require(args.samples_per_prompt >= 5, "at least five samples per prompt are required")
+    identity = validated_identity(args)
+    require(
+        args.samples_per_prompt >= 5, "at least five samples per prompt are required"
+    )
 
     endpoint = validate_endpoint(args.endpoint)
     key = load_key(args.api_key_file)
@@ -297,7 +305,9 @@ def main() -> int:
                         key,
                         args.model,
                         item[0],
-                        marker=f"Synthetic measured user {item[0]} sample {item[1]:02d}",
+                        marker=(
+                            f"Synthetic measured user {item[0]} sample {item[1]:02d}"
+                        ),
                     ),
                 ),
                 [
@@ -308,7 +318,9 @@ def main() -> int:
             )
         )
     probe_prompts = {
-        target: [messages for item_target, messages in probe_items if item_target == target]
+        target: [
+            messages for item_target, messages in probe_items if item_target == target
+        ]
         for target in (2000, 4000, 6000)
     }
 
@@ -342,6 +354,7 @@ def main() -> int:
         json.dumps(
             {
                 "status": "pass",
+                **identity,
                 "wall_seconds_including_setup_and_drain": round(
                     time.monotonic() - started, 3
                 ),

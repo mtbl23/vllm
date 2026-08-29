@@ -26,6 +26,7 @@ CONTAINER_ID = "c" * 64
 GPU_UUID = "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 GPU_IDENTITY = f"NVIDIA GeForce RTX 5070 Ti, {GPU_UUID}, 16303, 590.00"
 RELEASE_NONCE = "e" * 64
+SOURCE_ARCHIVE_SHA256 = "8" * 64
 MACHINE_ID_SHA256 = "1" * 64
 BOOT_ID = "11111111-2222-3333-4444-555555555555"
 DOCKER_ID = "DOCKER:HOST:1234"
@@ -46,6 +47,17 @@ GPU = {
     "driver_version": "590.00",
     "compute_capability": [12, 0],
 }
+
+
+def qualification_identity() -> dict:
+    return {
+        "image_digest": IMAGE_DIGEST,
+        "fork_commit": FORK_COMMIT,
+        "model_revision": MODEL_REVISION,
+        "gpu_name": GPU_IDENTITY,
+        "release_nonce": RELEASE_NONCE,
+        "container_id": CONTAINER_ID,
+    }
 
 
 def write_json(path: Path, payload) -> None:
@@ -75,6 +87,8 @@ def container(started_at: str = "2026-08-28T00:00:00Z") -> list[dict]:
                     "ai.vllm.build.commit": FORK_COMMIT,
                     "ai.verse.gpu.uuid": GPU_UUID,
                     "ai.verse.runtime.profile": MODULE.EXPECTED_PROFILE_IDENTITY,
+                    "ai.verse.source.archive.sha256": SOURCE_ARCHIVE_SHA256,
+                    "ai.verse.vllm.wheel.version": f"0.28.0+verse.{FORK_COMMIT[:12]}",
                 },
             },
             "HostConfig": {
@@ -102,6 +116,7 @@ def stream(content_chunks: int = 2) -> dict:
 def chat_contract() -> dict:
     return {
         "status": "pass",
+        **qualification_identity(),
         "scope": "complete",
         "model": "verse-free",
         "ordinary_prompt_tokens": 64,
@@ -180,6 +195,8 @@ def chat_contract() -> dict:
             "simultaneous_decoding_streams": 38,
             "running_metric_samples": 10,
             "kv_cache_usage_at_simultaneous_decode": 0.9,
+            "simultaneous_resident_context_tokens_per_request": 6143,
+            "kv_cache_usage_at_simultaneous_6143": 0.9,
             "observed_max_kv_cache_usage": 0.9,
             "kv_cache_usage_after_drain": 0.9,
             "kv_cache_block_bytes": 294912,
@@ -188,6 +205,7 @@ def chat_contract() -> dict:
             "usable_kv_cache_blocks": 19341,
             "configured_kv_cache_bytes": 5704253440,
             "concurrent_6144_completion_proven": True,
+            "concurrent_6143_residency_proven": True,
             "preemptions_before": 0,
             "preemptions_after": 0,
             "scheduler_running_before": 0,
@@ -228,6 +246,7 @@ def b01_report(target: int, run: int) -> dict:
         "preemption_error": None,
         "steady_window_seconds": 12.0,
         "steady_window_samples": 200,
+        "steady_window_prompt_tokens_delta": 0,
         "steady_aggregate_tokens_per_second": throughput,
         "wall_aggregate_tokens_per_second": throughput,
         "prewarmed": prewarmed,
@@ -302,6 +321,7 @@ def cuda_image_verification() -> dict:
                     "_C_stable_libtorch.abi3.so"
                 ),
                 "bytes": 123456,
+                "wheel_member": "vllm/_C_stable_libtorch.abi3.so",
                 "sha256": "3" * 64,
             },
             "wheel_artifact": {
@@ -424,6 +444,7 @@ def server_record() -> str:
         "endpoint=http://127.0.0.1:8000\n"
         f"commit={FORK_COMMIT}\n"
         f"profile={MODULE.EXPECTED_PROFILE_IDENTITY}\n"
+        f"image_receipt_sha256={hashlib.sha256(json.dumps(image_receipt()).encode()).hexdigest()}\n"
         f"model_manifest_sha256={MODULE.EXPECTED_PROFILE['VERSE_MODEL_MANIFEST_SHA256']}\n"
         f"model_config_sha256={'6' * 64}\n"
         f"model_ready_marker_sha256={'7' * 64}\n"
@@ -432,9 +453,33 @@ def server_record() -> str:
     )
 
 
+def image_receipt() -> dict:
+    binary = cuda_image_verification()["vllm_binary_identity"]
+    native = binary["native_extension"]
+    wheel = binary["wheel_artifact"]
+    return {
+        "schema_version": 1,
+        "status": "approved",
+        "approved_at": "2026-08-29T00:00:00+00:00",
+        "image_digest": IMAGE_DIGEST,
+        "fork_commit": FORK_COMMIT,
+        "runtime_profile": MODULE.EXPECTED_PROFILE_IDENTITY,
+        "source_archive_sha256": SOURCE_ARCHIVE_SHA256,
+        "vllm_wheel_version": f"0.28.0+verse.{FORK_COMMIT[:12]}",
+        "binary_identity": {
+            "wheel_filename": wheel["filename"],
+            "wheel_sha256": wheel["sha256"],
+            "wheel_manifest_sha256": wheel["manifest_sha256"],
+            "native_extension_member": native["wheel_member"],
+            "native_extension_sha256": native["sha256"],
+        },
+    }
+
+
 def churn() -> dict:
     return {
         "status": "pass",
+        **qualification_identity(),
         "duration_seconds": 901,
         "concurrency": 38,
         "prompt_pool_size": 64,
@@ -453,6 +498,98 @@ def churn() -> dict:
             "waiting": 0,
             "preemptions": 0,
             "prefix_hits": 200,
+        },
+    }
+
+
+def queue_stress() -> dict:
+    def phase(name: str, clients: int, waiting: int) -> dict:
+        before = {"running": 0, "waiting": 0, "preemptions": 0}
+        after = {"running": 0, "waiting": 0, "preemptions": 0}
+        return {
+            "name": name,
+            "clients": clients,
+            "active_capacity": 38,
+            "request_errors": 0,
+            "observed_max_waiting": waiting,
+            "metrics_evidence": {
+                "observed_max_running": 38,
+                "observed_generation_tokens_delta": 1000,
+            },
+            "metrics_before": before,
+            "metrics_after": after,
+        }
+
+    return {
+        "status": "pass",
+        **qualification_identity(),
+        "stress_seconds": 120,
+        "prompt_token_targets": [5500, 5750, 6000],
+        "max_completion_tokens": 128,
+        "phases": [phase("max-active", 38, 0), phase("overflow-queue", 76, 38)],
+    }
+
+
+def user_latency() -> dict:
+    def mode(name: str, background: int, waiting: int) -> dict:
+        samples = []
+        for target in (2000, 4000, 6000):
+            for _ in range(5):
+                samples.append(
+                    {
+                        "prompt_tokens": target,
+                        "completion_tokens": 128,
+                        "ttft_seconds": 0.5,
+                        "end_to_end_seconds": 2.0,
+                        "decode_tokens_per_second": 80.0,
+                        "running_at_arrival": min(background, 38),
+                        "waiting_at_arrival": waiting,
+                    }
+                )
+        return {
+            "mode": name,
+            "background_clients": background,
+            "measured_user_clients": 15,
+            "samples_per_prompt": 5,
+            "request_errors": 0,
+            "preemptions_delta": 0,
+            "samples": samples,
+        }
+
+    return {
+        "status": "pass",
+        **qualification_identity(),
+        "completion_tokens_requested": 128,
+        "modes": [mode("saturated", 14, 0), mode("overloaded", 52, 14)],
+    }
+
+
+def warm_latency() -> dict:
+    def summary(samples: int) -> dict:
+        return {
+            "samples": samples,
+            "ttft_p50_seconds": 0.5,
+            "ttft_p95_seconds": 1.0,
+            "end_to_end_p50_seconds": 2.0,
+            "end_to_end_p95_seconds": 3.0,
+            "decode_p05_tokens_per_second": 40.0,
+        }
+
+    grouped = {
+        "2000": summary(13),
+        "4000": summary(13),
+        "6000": summary(12),
+    }
+    return {
+        "status": "pass",
+        **qualification_identity(),
+        "clients": 38,
+        "completion_tokens_requested": 100,
+        "preemptions_delta": 0,
+        "cold": {"pressure": {"max_running": 38}, "by_prompt_tokens": grouped},
+        "warm_delta": {
+            "pressure": {"max_running": 38},
+            "by_prompt_tokens": grouped,
         },
     }
 
@@ -479,6 +616,9 @@ def release_tree(tmp_path: Path) -> Path:
     write_json(release / "short/prefill-37x1.json", prefill_interference(37, 1))
     write_json(release / "short/prefill-30x8.json", prefill_interference(30, 8))
     write_json(release / "short/chat-contract.json", chat_contract())
+    write_json(release / "queue-stress.json", queue_stress())
+    write_json(release / "user-latency.json", user_latency())
+    write_json(release / "warm-latency.json", warm_latency())
     write_json(release / "churn.json", churn())
     write_json(release / "post-churn-chat-contract.json", chat_contract())
     for relative in (
@@ -499,6 +639,7 @@ def release_tree(tmp_path: Path) -> Path:
     write_text(release / "cuda-oracle.log", log)
     write_json(release / "cuda-oracle.json", cuda_identity(log))
     write_json(release / "candidate-host.json", candidate_host())
+    write_json(release / "image-receipt.json", image_receipt())
     return release
 
 
@@ -519,6 +660,35 @@ def test_release_finalizer_accepts_one_unchanged_container(tmp_path: Path):
     assert set(result["artifacts_sha256"]) == set(
         MODULE.EXPECTED_ARTIFACT_RELATIVE_PATHS
     )
+
+
+def test_release_finalizer_rejects_receipt_binary_identity_drift(tmp_path: Path):
+    release = release_tree(tmp_path)
+    path = release / "image-receipt.json"
+    payload = json.loads(path.read_text())
+    payload["binary_identity"]["native_extension_sha256"] = "f" * 64
+    write_json(path, payload)
+
+    try:
+        MODULE.finalize(release)
+    except ValueError as exc:
+        assert "runtime binary identity differs" in str(exc)
+    else:
+        raise AssertionError("receipt for unrelated native bytes was accepted")
+
+
+def test_release_finalizer_rejects_server_receipt_hash_drift(tmp_path: Path):
+    release = release_tree(tmp_path)
+    path = release / "post-churn-server.txt"
+    receipt_sha256 = hashlib.sha256(json.dumps(image_receipt()).encode()).hexdigest()
+    path.write_text(path.read_text().replace(receipt_sha256, "f" * 64))
+
+    try:
+        MODULE.finalize(release)
+    except ValueError as exc:
+        assert "image receipt" in str(exc)
+    else:
+        raise AssertionError("server using another image receipt was accepted")
 
 
 def test_release_finalizer_rejects_restart(tmp_path: Path):
@@ -569,7 +739,7 @@ def test_release_finalizer_rejects_placeholder_chat_evidence(tmp_path: Path):
     try:
         MODULE.finalize(release)
     except ValueError as exc:
-        assert "startup-only" in str(exc)
+        assert "belongs to another candidate" in str(exc)
     else:
         raise AssertionError("status-only chat evidence was accepted")
 
@@ -615,6 +785,18 @@ def test_release_finalizer_rejects_missing_concurrent_completion_proof(tmp_path:
     write_json(release / "short/chat-contract.json", payload)
 
     with pytest.raises(ValueError, match="38 concurrent exact-6144 completions"):
+        MODULE.finalize(release)
+
+
+def test_release_finalizer_rejects_missing_simultaneous_6143_residency(
+    tmp_path: Path,
+):
+    release = release_tree(tmp_path)
+    payload = chat_contract()
+    payload["exact_boundary_capacity"]["concurrent_6143_residency_proven"] = False
+    write_json(release / "short/chat-contract.json", payload)
+
+    with pytest.raises(ValueError, match="simultaneous near-full 6K residents"):
         MODULE.finalize(release)
 
 

@@ -3,7 +3,9 @@
 
 import importlib.util
 import json
+import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -126,12 +128,86 @@ def test_cloudflare_route_accepts_only_exact_proxied_record():
 
 def test_cloudflare_route_receipt_is_exclusive_and_owner_only(tmp_path: Path):
     receipt = tmp_path / "receipt.json"
-    route._write_receipt(receipt, {"status": "verified"})
+    fd = route._reserve_receipt(receipt, {"status": "pending"})
+    route._finish_receipt(fd, {"status": "verified"})
+    os.close(fd)
 
     assert json.loads(receipt.read_text()) == {"status": "verified"}
     assert stat.S_IMODE(receipt.stat().st_mode) == 0o600
     with pytest.raises(ValueError):
-        route._write_receipt(receipt, {"status": "replaced"})
+        route._reserve_receipt(receipt, {"status": "replaced"})
+
+
+def test_cloudflare_route_reserves_receipt_and_rechecks_before_patch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    token = tmp_path / "token"
+    token.write_text("secret\n")
+    token.chmod(0o600)
+    receipt = tmp_path / "receipt.json"
+    lock = tmp_path / "cutover.lock"
+    record_id = "a" * 32
+    current_tunnel = "11111111-2222-3333-4444-555555555555"
+    target_tunnel = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+    current = route._tunnel_cname(current_tunnel)
+    target = route._tunnel_cname(target_tunnel)
+    calls: list[str] = []
+
+    def request(*, method, path, token, payload=None):
+        del path, token
+        calls.append(method)
+        if method == "PATCH":
+            assert receipt.exists()
+            assert json.loads(receipt.read_text())["status"] == "pending"
+            assert payload == {"content": target}
+            content = target
+            modified = "2026-08-29T00:00:01Z"
+        else:
+            content = target if calls.count("GET") == 3 else current
+            modified = (
+                "2026-08-29T00:00:01Z"
+                if calls.count("GET") == 3
+                else "2026-08-29T00:00:00Z"
+            )
+        return {
+            "id": record_id,
+            "type": "CNAME",
+            "name": "free-inference.verse-rp.com",
+            "content": content,
+            "proxied": True,
+            "modified_on": modified,
+        }
+
+    monkeypatch.setattr(route, "_api_request", request)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(ROUTE_PATH),
+            "switch",
+            "--zone-id",
+            "b" * 32,
+            "--record-id",
+            record_id,
+            "--hostname",
+            "free-inference.verse-rp.com",
+            "--expected-current-tunnel",
+            current_tunnel,
+            "--target-tunnel",
+            target_tunnel,
+            "--api-token-file",
+            str(token.resolve()),
+            "--receipt",
+            str(receipt.resolve()),
+            "--lock",
+            str(lock.resolve()),
+            "--apply",
+        ],
+    )
+
+    assert route.main() == 0
+    assert calls == ["GET", "GET", "PATCH", "GET"]
+    assert json.loads(receipt.read_text())["status"] == "verified"
 
 
 def test_public_gateway_credential_reader_rejects_broad_permissions(tmp_path: Path):

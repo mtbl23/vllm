@@ -11,7 +11,7 @@ on:
       - csrc/**
       - docker/**
       - requirements/verse-sm120-flashinfer.lock
-      - tests/kernels/attention/test_cache.py
+      - tests/kernels/attention/test_verse_sm120_nvfp4_kv_cache.py
       - tests/kernels/attention/test_flashinfer.py
       - tests/kernels/quantization/nvfp4_utils.py
       - tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py
@@ -64,9 +64,34 @@ jobs:
           set -o pipefail
           tools/verse/build_sm120_image.sh | tee "$RUNNER_TEMP/verse-sm120-image.txt"
 
+      - name: Create externally controlled image approval receipt
+        run: |
+          set -euo pipefail
+          metadata="$RUNNER_TEMP/verse-sm120-image.txt"
+          image=$(awk -F= '$1 == "image_digest" {print $2}' "$metadata")
+          commit=$(awk -F= '$1 == "commit" {print $2}' "$metadata")
+          wheel=$(awk -F= '$1 == "vllm_wheel_version" {print $2}' "$metadata")
+          source_archive=$(awk -F= '$1 == "source_archive_sha256" {print $2}' "$metadata")
+          test -n "$image" -a -n "$commit" -a -n "$wheel" -a -n "$source_archive"
+          docker pull "$image"
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --entrypoint /usr/local/bin/verify-verse-sm120-image \
+            "$image" >"$RUNNER_TEMP/verse-sm120-image-verification.json"
+          uv run --script tools/verse/sm120_image_receipt.py create \
+            --image "$image" \
+            --fork-commit "$commit" \
+            --runtime-profile sm120-gemma4-nvfp4-v4 \
+            --source-archive-sha256 "$source_archive" \
+            --vllm-wheel-version "$wheel" \
+            --verification "$RUNNER_TEMP/verse-sm120-image-verification.json" \
+            --output "$RUNNER_TEMP/verse-sm120-image-receipt.json"
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: verse-sm120-image-${{ github.sha }}
-          path: ${{ runner.temp }}/verse-sm120-image.txt
+          path: |
+            ${{ runner.temp }}/verse-sm120-image.txt
+            ${{ runner.temp }}/verse-sm120-image-receipt.json
           if-no-files-found: error
           retention-days: 30

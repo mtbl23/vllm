@@ -530,9 +530,11 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi && \
     python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
 
-# Record the wheel checksum so downstream stages can bust their layer cache
-# when the wheel changes, without copying the wheel itself into the image.
-RUN sha256sum dist/*.whl > dist/wheel.sha256
+# Bind the wheel checksum to the exact native extension bytes it contains.
+RUN set -- dist/*.whl; test "$#" = 1; \
+    python3 tools/verse/build_sm120_wheel_identity.py \
+        --wheel "$1" --output dist/wheel-identity.json; \
+    sha256sum "$1" > dist/wheel.sha256
 
 # Copy extension wheels from extensions-build stage for later use
 COPY --from=extensions-build /tmp/ep_kernels_workspace/dist /tmp/ep_kernels_workspace/dist
@@ -1090,8 +1092,8 @@ COPY requirements/verse-sm120-flashinfer.lock \
     /opt/verse/requirements/verse-sm120-flashinfer.lock
 COPY tools/verse/verify_sm120_image.py \
     /usr/local/bin/verify-verse-sm120-image
-COPY --from=build /workspace/dist/wheel.sha256 \
-    /opt/verse/identity/vllm-wheel.sha256
+COPY --from=build /workspace/dist/wheel-identity.json \
+    /opt/verse/identity/vllm-wheel.json
 COPY tools/verse/prepare_sm120_model.py \
     /opt/verse-tools/prepare_sm120_model.py
 COPY tools/verse/validate_sm120_profile.py \
@@ -1129,7 +1131,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         /usr/local/bin/verse-sm120-entrypoint.sh \
         /opt/verse-tools/prepare_sm120_model.py \
         /opt/verse-tools/validate_sm120_profile.py
-RUN chmod 0444 /opt/verse/identity/vllm-wheel.sha256
+RUN chmod 0444 /opt/verse/identity/vllm-wheel.json
 COPY tests/__init__.py /opt/verse-tests/tests/__init__.py
 COPY tests/kernels/__init__.py /opt/verse-tests/tests/kernels/__init__.py
 COPY tests/kernels/attention/test_flashinfer.py \

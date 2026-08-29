@@ -134,6 +134,10 @@ def evaluate(reports: list[dict[str, Any]]) -> dict[str, Any]:
             int(report.get("steady_window_samples", 0)) >= 50,
             f"{target}-token run lacks enough metric samples",
         )
+        require(
+            float(report.get("steady_window_prompt_tokens_delta", math.inf)) == 0,
+            f"{target}-token run mixed prefill into its decode window",
+        )
         release_nonce = str(report.get("release_nonce", ""))
         require(
             RELEASE_NONCE_RE.fullmatch(release_nonce) is not None,

@@ -241,7 +241,7 @@ docker run --rm \
       tests/v1/attention/test_gemma4_nvfp4_flashinfer_routing.py \
       tests/v1/attention/test_nvfp4_flashinfer_vosplit.py \
       tests/kernels/attention/test_flashinfer.py \
-      tests/kernels/attention/test_cache.py \
+      tests/kernels/attention/test_verse_sm120_nvfp4_kv_cache.py \
       tests/kernels/quantization/nvfp4_utils.py \
       tests/kernels/quantization/test_verse_sm120_b12x_nvfp4.py; do
       sha256sum "$artifact" | sed "s#^#VERSE_CUDA_TEST_ARTIFACT_SHA256=#"

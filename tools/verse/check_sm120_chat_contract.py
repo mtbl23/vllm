@@ -22,6 +22,11 @@ from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
+from sm120_evidence_identity import (
+    add_identity_arguments,
+    validated_optional_identity,
+)
+
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -187,6 +192,7 @@ def parse_sse(
     expected_completion_tokens: int | None = None,
     expected_finish_reason: str | None = None,
     on_first_completion_token: Callable[[], None] | None = None,
+    on_completion_progress: Callable[[int], None] | None = None,
 ) -> dict[str, int | bool | str]:
     require(minimum_content_chunks >= 1, "minimum content chunks must be positive")
     require(
@@ -269,6 +275,8 @@ def parse_sse(
                     "stream contains a non-finite token logprob",
                 )
             completion_logprob_tokens += len(token_items)
+            if token_items and on_completion_progress is not None:
+                on_completion_progress(completion_logprob_tokens)
             if token_items and not notified_first_token:
                 notified_first_token = True
                 if on_first_completion_token is not None:
@@ -319,6 +327,7 @@ def stream_chat(
     expected_completion_tokens: int | None = None,
     expected_finish_reason: str | None = None,
     on_first_completion_token: Callable[[], None] | None = None,
+    on_completion_progress: Callable[[int], None] | None = None,
 ) -> dict[str, int | bool | str]:
     request = urllib.request.Request(
         f"{endpoint}/v1/chat/completions",
@@ -340,6 +349,7 @@ def stream_chat(
                 expected_completion_tokens=expected_completion_tokens,
                 expected_finish_reason=expected_finish_reason,
                 on_first_completion_token=on_first_completion_token,
+                on_completion_progress=on_completion_progress,
             )
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")[:1000]
@@ -704,7 +714,17 @@ def concurrent_boundary_acceptance(
     )
     start_barrier = threading.Barrier(concurrency + 1)
     first_token_events = [threading.Event() for _ in range(concurrency)]
+    completion_progress = [0 for _ in range(concurrency)]
+    completion_progress_lock = threading.Lock()
     cache_salts = [secrets.token_hex(32) for _ in range(concurrency)]
+
+    def _record_progress(index: int, tokens: int) -> None:
+        with completion_progress_lock:
+            require(
+                completion_progress[index] <= tokens <= completion_tokens,
+                "capacity completion progress moved backward or out of range",
+            )
+            completion_progress[index] = tokens
 
     def _run(index: int, item: list[dict[str, str]]) -> dict[str, int | bool | str]:
         try:
@@ -729,12 +749,14 @@ def concurrent_boundary_acceptance(
             expected_completion_tokens=completion_tokens,
             expected_finish_reason="length",
             on_first_completion_token=first_token_events[index].set,
+            on_completion_progress=lambda tokens: _record_progress(index, tokens),
         )
 
     observed_max_running = 0.0
     observed_max_kv_usage = 0.0
     running_metric_samples = 0
     simultaneous_decode_sample: dict[str, float] | None = None
+    simultaneous_6143_sample: dict[str, float] | None = None
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
         futures = [
             pool.submit(_run, index, item) for index, item in enumerate(messages)
@@ -763,6 +785,8 @@ def concurrent_boundary_acceptance(
             running_metric_samples += 1
             decoded_streams = sum(event.is_set() for event in first_token_events)
             unfinished_streams = sum(not future.done() for future in futures)
+            with completion_progress_lock:
+                minimum_completion_progress = min(completion_progress)
             if (
                 running == concurrency
                 and decoded_streams == concurrency
@@ -777,6 +801,20 @@ def concurrent_boundary_acceptance(
                     "KV occupancy was not positive during simultaneous decode",
                 )
                 simultaneous_decode_sample = sample
+            if (
+                running == concurrency
+                and unfinished_streams == concurrency
+                and minimum_completion_progress >= completion_tokens - 1
+            ):
+                require(
+                    sample["waiting"] == 0,
+                    "capacity batch queued requests near the 6144-token boundary",
+                )
+                require(
+                    sample["kv_usage"] > 0,
+                    "KV occupancy was not positive near the 6144-token boundary",
+                )
+                simultaneous_6143_sample = sample
             if all(future.done() for future in futures):
                 break
             time.sleep(metrics_poll_interval)
@@ -790,6 +828,10 @@ def concurrent_boundary_acceptance(
     require(
         simultaneous_decode_sample is not None,
         "capacity batch did not prove all streams decoding while 38 were running",
+    )
+    require(
+        simultaneous_6143_sample is not None,
+        "capacity batch did not prove all 38 streams resident at 6143 context tokens",
     )
     require(
         after["preemptions"] == before["preemptions"],
@@ -843,6 +885,10 @@ def concurrent_boundary_acceptance(
         "simultaneous_decoding_streams": concurrency,
         "running_metric_samples": running_metric_samples,
         "kv_cache_usage_at_simultaneous_decode": simultaneous_decode_sample["kv_usage"],
+        "simultaneous_resident_context_tokens_per_request": prompt_tokens
+        + completion_tokens
+        - 1,
+        "kv_cache_usage_at_simultaneous_6143": simultaneous_6143_sample["kv_usage"],
         "observed_max_kv_cache_usage": observed_max_kv_usage,
         "kv_cache_usage_after_drain": after["kv_usage"],
         "kv_cache_block_bytes": CAPACITY_BLOCK_BYTES,
@@ -851,6 +897,7 @@ def concurrent_boundary_acceptance(
         "usable_kv_cache_blocks": usable_blocks,
         "configured_kv_cache_bytes": CAPACITY_TOTAL_KV_BYTES,
         "concurrent_6144_completion_proven": True,
+        "concurrent_6143_residency_proven": True,
         "preemptions_before": before["preemptions"],
         "preemptions_after": after["preemptions"],
         "scheduler_running_before": before["running"],
@@ -872,6 +919,7 @@ def main() -> int:
         action="store_true",
         help="Run only the ordinary streaming and deterministic startup canaries.",
     )
+    add_identity_arguments(parser, required=False)
     args = parser.parse_args()
 
     try:
@@ -903,6 +951,7 @@ def main() -> int:
             endpoint, key, args.model, ordinary_messages
         )
         semantic_rp = semantic_rp_evidence(endpoint, key, args.model)
+        identity = validated_optional_identity(args)
         result: dict[str, Any] = {
             "status": "pass",
             "scope": "startup" if args.startup_only else "complete",
@@ -912,6 +961,8 @@ def main() -> int:
             "greedy_decode_evidence": greedy_decode,
             "semantic_rp_evidence": semantic_rp,
         }
+        if identity is not None:
+            result.update(identity)
         if not args.startup_only:
             accepted_messages = exact_context_messages(
                 endpoint, key, args.model, target=6143
